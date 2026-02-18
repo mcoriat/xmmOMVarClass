@@ -92,13 +92,13 @@ from cdshealpix import nested
 #  Global definitions  #
 ########################
 
-ROOT = '/Volumes/DATA11/'  # data disk
-TOPCATPATH = "/Users/kuin/bin" # /disk/xray16/npmk/bin
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__))) + '/'  # repo root
+TOPCATPATH = "stilts"  # stilts is in PATH (/opt/homebrew/bin/stilts)
 work = os.getcwd()+"/"
 
-gaiacat  = ROOT+'data/catalogs/gaiadr3_pmgt25.fits' #  /disk/xray16/npmk/ ???
-gaiapath = ROOT+'data/catalogs/gaiadr3_PM/' # store here the split up cat.
-gaiaHP   = ROOT+'data/catalogs/gaiadr3_healpix.fits' # gaiacat with healpix col.
+gaiacat  = ROOT+'gaiadr3_pmgt25.fits'
+gaiapath = ROOT+'output/gaiadr3_PM/' # store here the split up cat.
+gaiaHP   = ROOT+'output/gaiadr3_healpix.fits' # gaiacat with healpix col.
 gaiaObsidTable = work+'/gaiadr3_obsid_tiles.fits'
 GaiaEpoch = 2016.0
 
@@ -118,10 +118,8 @@ do_epoch    = True #True if running for first time on chunks
 prints2file = False #TBD not implemented
 
 if catalog == 'SUSS':
-   #rootobs    = ROOT+'data/catalogs/suss_gaia_epic/'
-   #chunks     = ['XMM-OM-SUSS5.0.fits']
-   rootobs    = ROOT+'data/catalogs/suss6.2/'
-   chunks     = ['XMM-OM-SUSS6.2.fits']
+   rootobs    = ROOT
+   chunks     = ['XMM-OM-SUSS6.1.fits']
    match_par  = 2.5  # see line 471: typical positional error in Gaia DR3 match is 2.5 
 elif catalog == 'UVOTSSC2':
    rootobs    = ROOT+'data/catalogs/uvotssc2/' # '/disk/xray16/npmk/uvotssc2/'
@@ -258,7 +256,7 @@ class finalise(object):
        if status > 0: print(f"finalise.stilts_merge 251 Error in {command2} ")    
        """
        
-       command1 = f"java -jar ~/bin/topcat-full.jar -stilts tcat in='{self.infiles_match}' "+\
+       command1 = f"{TOPCATPATH} tcat in='{self.infiles_match}' "+\
          f" ifmt=fits out={self.matchout}  ofmt=fits lazy=True"  #+\
          #f" icmd='delcols GroupID' icmd='delcols GroupSize' icmd='delcols Separation' icmd='delcols 2000Ep' "+\
        print (f"in finalise.stilt_merge commands: \n{command1}\n")
@@ -268,7 +266,7 @@ class finalise(object):
            raise RuntimeError()
           
                  
-       command2 = f"java -jar ~/bin/topcat-full.jar -stilts tcat in='{self.infiles_nomatch}' "+\
+       command2 = f"{TOPCATPATH} tcat in='{self.infiles_nomatch}' "+\
          f" ifmt=fits out={self.nomatch}  ofmt=fits lazy=True " # +\
          #" icmd='delcols GroupID' icmd='delcols GroupSize' icmd='delcols Separation' icmd='delcols 2000Ep' "                
        print (f"in finalise.stilt_merge commands: \n{command2}\n")     
@@ -286,7 +284,8 @@ class finalise(object):
        #
        import os
        
-       command4 = f"/bin/csh ~/bin/stilts_fin_match2gaia.sh {self.matchout} {self.nomatch} {self.outfile}"
+       _script_dir = os.path.dirname(os.path.abspath(__file__))
+       command4 = f"bash {_script_dir}/stilts_fin_match2gaia.sh {self.matchout} {self.nomatch} {self.outfile}"
        print (f"finalise.match2gaiadr3 -- call stilts_fin_match2gaia.sh: \n{command4}\n")
        status = os.system(command4)
        if status > 0: print(f"finalise.match2gaiadr3 285 Error in {command4} ")
@@ -558,32 +557,39 @@ def match2gaia_cat(root='.',catin=None,cat_matched=None,cat_nomatch=None,
 
     print ('1 precess')
     # precess gaiadr3_pmxxx to midEpoch -> (raObs,decObs):
-    command=f"java -jar {TOPCATPATH}/topcat-full.jar -stilts tpipe "+\
+    command=f"{TOPCATPATH} tpipe "+\
     f"in={gcatin} ifmt=fits out={gaiaout} ofmt=fits "+\
     f'cmd="addcol epxxxx epochProp({midEpoch}-{gaia_epoch},ra,dec,parallax,pmra,pmdec,0.)" '+\
     f"cmd='addcol raObs pick(epxxxx,0)[0];addcol decObs pick(epxxxx,1)[0]' "+\
-    f"cmd='delcols 'epxxxx';addcol obsEp {midEpoch}'" 
+    f'cmd="delcols epxxxx;addcol obsEp {midEpoch}"'
     #print (command)
     status = os.system(command)
     if status > 0: print(f"560 Error in {command} ")
 
     print('2 match')
-    # match 
-    command=f"java -jar {TOPCATPATH}/topcat-full.jar -stilts "+\
+    # match
+    command=f"{TOPCATPATH} "+\
     f"tmatch2 in1={catin} ifmt1=fits  in2={gaiaout} ifmt2=fits "+\
     f"out={matchout} ofmt=fits-basic  matcher=skyerr "+\
     f"values1='RA DEC POSERR' values2='ra dec ra_error*0.001'  "+\
-    f" params={match_par}   join=1and2 find=best2 fixcols=dups suffix1=  suffix2=2016gaia  "+\
-    f" ocmd='delcols 'GroupID';delcols 'GroupSize' '"
-#  f"ocmd='addcol ra2016gaia ra';'addcol dec2016gaia dec' "+\
-#  f"ocmd=delcols 'ra dec raObs decObs obsEp' "
-    #print('465 ',command)
+    f" params={match_par}   join=1and2 find=best2 fixcols=dups suffix1=  suffix2=2016gaia  "
     status = os.system(command)
     if status > 0: print(f"574 Error in {command} ")
+    # find=best2 only creates GroupID/GroupSize when there are duplicate groups;
+    # remove them if present, ignore if absent
+    if status == 0 and os.path.exists(matchout):
+        from astropy.io import fits as pyfits
+        with pyfits.open(matchout) as hdul:
+            colnames = [c.name for c in hdul[1].columns]
+        cols_to_del = [c for c in ['GroupID','GroupSize'] if c in colnames]
+        if cols_to_del:
+            delcmd = ";".join([f"delcols {c}" for c in cols_to_del])
+            cleanup = f'{TOPCATPATH} tpipe in={matchout} ifmt=fits out={matchout} ofmt=fits-basic cmd="{delcmd}"'
+            os.system(cleanup)
 
     print ('3 nomatch')
     # nomatch
-    command=f"java -jar {TOPCATPATH}/topcat-full.jar -stilts "+\
+    command=f"{TOPCATPATH} "+\
     f"tmatch2 in1={catin} ifmt1=fits in2={gaiaout} ifmt2=fits  "+\
     f"out={nomatchout} ofmt=fits-basic  matcher=skyerr "+\
     f"values1='RA DEC POSERR'  values2='ra dec ra_error*0.001' "+\
@@ -607,11 +613,11 @@ def match2gaia_cat(root='.',catin=None,cat_matched=None,cat_nomatch=None,
         ra_ep = "ra"+str(toEpoch).split('.')[0]+'Ep'
         de_ep = "dec"+str(toEpoch).split('.')[0]+'Ep'
         to_ep = str(toEpoch).split('.')[0]+'Ep'
-        command=f"java -jar {TOPCATPATH}/topcat-full.jar -stilts tpipe "+\
+        command=f"{TOPCATPATH} tpipe "+\
         f"in={matchout} ifmt=fits out={matchout2} ofmt=fits-basic "+\
         f'cmd="addcol epxxxx epochProp({toEpoch}-{gaia_epoch},ra,dec,parallax,pmra,pmdec,0.)" '+\
         f'cmd="addcol {ra_ep} pick(epxxxx,0)[0];addcol {de_ep} pick(epxxxx,1)[0]" '+\
-        f"cmd='delcols 'epxxxx';addcol {to_ep} {toEpoch}' "
+        f'cmd="delcols epxxxx;addcol {to_ep} {toEpoch}" '
         print ("605 ",command)
         status = os.system(command)
         if status > 0: print(f"Error in {command} ")
@@ -626,7 +632,7 @@ def match2gaia_cat(root='.',catin=None,cat_matched=None,cat_nomatch=None,
         ra_ep = "ra"+str(toEpoch).split('.')[0]+'Ep'
         de_ep = "dec"+str(toEpoch).split('.')[0]+'Ep'
         to_ep = str(toEpoch).split('.')[0]+'Ep'
-        command=f"java -jar {TOPCATPATH}/topcat-full.jar -stilts "+\
+        command=f"{TOPCATPATH} "+\
         f" tpipe in={nomatchout} ifmt=fits out={nomatchout2} ofmt=fits-basic "+\
         f"cmd='addcol {ra_ep} RA;addcol {de_ep} DEC;addcol {to_ep} {toEpoch}' " 
         print (command)
@@ -655,7 +661,7 @@ def match2gaia_cat(root='.',catin=None,cat_matched=None,cat_nomatch=None,
     status = os.system(f"mv {matchout} {outputf1}")
     status = os.system(f"mv {nomatchout} {outputf2}")
     """ obsolete
-    command=f"java -jar {TOPCATPATH}/topcat-full.jar -stilts "+\
+    command=f"{TOPCATPATH} "+\
     f"tmulti in='{matchout} {nomatchout}' ifmt=fits "+\
     f" out={outputf} ofmt=fits-basic"  
     print (f'303 {command}')
@@ -693,7 +699,7 @@ def editObscat(rootobs,work,TOPCATPATH):
         if status > 0: print(f"Error in {command} ")
         
         # copy the summary extension to its own file  SUSS-SUMMARY to temp4
-        command=f"java -jar {TOPCATPATH}/topcat-full.jar -stilts tpipe "+\
+        command=f"{TOPCATPATH} tpipe "+\
         f"in={temp1+'#2'} ifmt=fits out={temp4} ofmt=fits-basic"
         print ("\n331 ",command)
         status = os.system(command)
@@ -701,7 +707,7 @@ def editObscat(rootobs,work,TOPCATPATH):
        
         # edit the dates in the uvotssc2 input file to MJD
         if (catalog == 'UVOTSSC2'):  # copy cat-SRCxxx to temp2, add MJD  
-           command=f"java -jar {TOPCATPATH}/topcat-full.jar -stilts tpipe "+\
+           command=f"{TOPCATPATH} tpipe "+\
     f"in={temp1+'#2'} ifmt=fits out={temp2} ofmt=fits-basic "+\
     f"cmd='addcol -units d MJD_START isoToMjd(DATE_MIN)' "+\
     f"cmd='addcol -units d MJD_END isoToMjd(DATE_MAX)' "+\
@@ -713,20 +719,21 @@ def editObscat(rootobs,work,TOPCATPATH):
         if status > 0: print(f"Error in {command} ")
                 
         print (f"\nnow recombine with summary ")
-        command=f"java -jar {TOPCATPATH}/topcat-full.jar -stilts "+\
+        command=f"{TOPCATPATH} "+\
          f"tmulti in='{temp1+'#1'} {temp2}' ifmt=fits out={temp3} ofmt=fits-basic"  
         print ("\n349 ",command)
         status = os.system(command)
         if status > 0: print(f"Error in {command} ")
         
-        # add the epoch 
-        command=f"addEpoch2Source.sh {temp3} {temp1}"
+        # add the epoch
+        _script_dir = os.path.dirname(os.path.abspath(__file__))
+        command=f"{_script_dir}/addEpoch2Source.sh {temp3} {temp1}"
         print ("355 ",command)
         status = os.system(command)
         if status > 0: print(f"Error in {command} ")
                 
         #print (f"\n recombine result once more with summary ")
-        command=f"java -jar {TOPCATPATH}/topcat-full.jar -stilts tmulti "+\
+        command=f"{TOPCATPATH} tmulti "+\
          f"in='{temp1} {temp4}' ifmt=fits out={rootobs+bit} ofmt=fits-basic"  
         print ("\n362 ",command)
         status = os.system(command)
@@ -816,7 +823,7 @@ def  processGaiaPM(rootobs,chunks=None, xcat=None, obsids=None, chatter=1):
                         gfil = gaiafil.split('.')[0].split('/')[-1]
                         tmp = work+f"/tmp_{gfil}_{n_bit}_{n_obsid:00005}.fits"
                         n_bit += 1
-                        command=f"java -jar {TOPCATPATH}/topcat-full.jar -stilts "+\
+                        command=f"{TOPCATPATH} "+\
                       f' tpipe in={gaiafil} ifmt=fits out={tmp} ofmt=fits '+\
                       f' cmd="select skyDistanceDegrees(ra,dec,{ra_pnt},{dec_pnt})<{RADIUS}"'
                         if chatter > 3: print (command)
@@ -848,7 +855,7 @@ def  processGaiaPM(rootobs,chunks=None, xcat=None, obsids=None, chatter=1):
         for fil in gfiles[n1:n2]: 
             xxx = xxx+fil+" " # this is a list of fits files to stack
             if chatter > 4: print (f"files to stack: {xxx}")
-        command = f"java -jar {TOPCATPATH}/topcat-full.jar -stilts "+\
+        command = f"{TOPCATPATH} "+\
             f"tcat in='{xxx}' ifmt=fits out={gaia_temp_cat} ofmt=fits-basic"  
         if chatter > 3: print (f"{command}\n")
         status = os.system(command)
@@ -932,11 +939,13 @@ def mainx():
     # initialise xcat
     print (f"initialising the Gaia catalogue bits")
     if use_healpix:
-        try:  
+        try:
             xcat = healpix_catalogue(gaiaHP, None, ext=1 )
-        except:
-            xcat = healpix_catalogue(gaiacat, gaiaHP, ext=1 )
-            use_helpix = False
+        except (FileNotFoundError, RuntimeError, OSError):
+            print(f"HEALPix catalogue not found at {gaiaHP}, building from {gaiacat}...")
+            xcat = healpix_catalogue(gaiacat, gaiaHP, ext=1, hpcat=False)
+            xcat.add_healpixno()
+            print(f"HEALPix catalogue saved to {gaiaHP}")
     else:
         xcat = split_catalogue(gaiacat, gaiapath, ext=1 )
     

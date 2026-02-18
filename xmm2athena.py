@@ -1,76 +1,89 @@
 
-# code for updating / adding to the SUSS catalog SUMMARY and SOURCE 
+# code for updating / adding to the SUSS catalog SUMMARY and SOURCE
 
 #
 # processing: set up parameters
+# Configuration is loaded from xmm2athena_config.ini if present,
+# otherwise defaults are used.
 #
 
-# same as make_file_variable below
-catversion = 16
-
-# this is where the code expects the topcat-full.jar executable
-TOPCATPATH = "/Users/kuin/bin" 
-
-# output catalogue for the variable sources
-outcat = f"SimbadxSUSS5_variable_sources_v{catversion}.fits"
-
-# *** inputs for make_file_variable( ) :
-inputdir = '/Volumes/DATA11/data/catalogs/suss_gaia_epic/v3/'
-
-# the single source catalogue input
-inputcat = "XMM-OM-SUSS5.0ep_singlerecs_v4_classified_v6.fits"
-
-# work dir
-workdir = "/Volumes/DATA11/data/catalogs/suss_gaia_epic/var_lc/"
-
-# filter to process : Though all bands are processed during the processing in 
-#  case of calling make_file_variable()
-band = 'uvw1' # one of uvw2,uvm2,uvw1,u,b,v
-
-# minimum required chi-squared reduced for inclusion (will reject data with quality # 0)
-chi2_red_min = 5.0
-
-# select only records from the single source catalogue which have good quality ? 
-onlyqualzero = True
-
-# set the minimum required source distance for inclusion in the variability 
-min_srcdist  = 6.0
-
-# minimum number of valid data points for inclusion into result
-minnumber = 8 
-
-# name of file listing bad obsids
-bad_obsidfile = workdir+"remove_obsidfile_list1.txt" # can be an existing list 
-bad_obsidfile2= workdir+"bad_obsids_gaiavar.txt"
-bad_obsidfile3= workdir+"bad_obsids_gaiavar+filter.txt"
-gaiavarStats  = "_gaiavarStats.txt"
-
-# tracing the selections log
-tracing_log = workdir+'tracing.txt'
-wntg = open(workdir+"details4wntg.txt","w")
-    
-# verbosity
-chatter = 2
-
-# names of RA, Dec columns at Epoch 2000, ICRS
-RA2000 = "RAJ2000Ep2000" 
-DE2000 = "DEJ2000Ep2000"
-
-# make plots 
-make_plots = False
-
-#directory for putting the light curves fits files and the plots, relative to inputdir
-var_lc = workdir # was: "../var_lc/"
-
-# select how many peaky observations in an obsid to remove 
-minpeaks= 2
-
-minplotpoints = 5
-##########################################################################################
-
-#from numba import jit
+import os
+import configparser
 import numpy as np
 import numpy.ma as ma
+
+def _load_config():
+    """Load configuration from xmm2athena_config.ini if it exists.
+
+    Searches for the config file in the following order:
+    1. Current working directory
+    2. Same directory as this module
+    """
+    config = configparser.ConfigParser()
+    module_dir = os.path.dirname(os.path.abspath(__file__))
+    config_candidates = [
+        os.path.join(os.getcwd(), 'xmm2athena_config.ini'),
+        os.path.join(module_dir, 'xmm2athena_config.ini'),
+    ]
+    for path in config_candidates:
+        if os.path.exists(path):
+            config.read(path)
+            print(f"[xmm2athena] Loaded config from {path}")
+            return config
+    print("[xmm2athena] WARNING: No xmm2athena_config.ini found, using defaults.")
+    return config
+
+_cfg = _load_config()
+
+# --- Paths (from config or defaults) ---
+TOPCATPATH = _cfg.get('paths', 'topcatpath', fallback="/Users/kuin/bin")
+inputdir   = _cfg.get('paths', 'inputdir', fallback='/Volumes/DATA11/data/catalogs/suss_gaia_epic/v3/')
+workdir    = _cfg.get('paths', 'workdir', fallback='/Volumes/DATA11/data/catalogs/suss_gaia_epic/var_lc/')
+
+# --- Catalogues ---
+inputcat   = _cfg.get('catalogues', 'inputcat', fallback="XMM-OM-SUSS5.0ep_singlerecs_v4_classified_v6.fits")
+sussep     = _cfg.get('catalogues', 'sussep', fallback="../../XMM-OM-SUSS5.0ep.fits")
+catversion = _cfg.getint('catalogues', 'catversion', fallback=16)
+outcat     = f"SimbadxSUSS5_variable_sources_v{catversion}.fits"
+
+# --- Variability parameters ---
+band          = _cfg.get('variability', 'band', fallback='uvw1')
+chi2_red_min  = _cfg.getfloat('variability', 'chi2_red_min', fallback=5.0)
+onlyqualzero  = _cfg.getboolean('variability', 'onlyqualzero', fallback=True)
+min_srcdist   = _cfg.getfloat('variability', 'min_srcdist', fallback=6.0)
+minnumber     = _cfg.getint('variability', 'minnumber', fallback=8)
+minpeaks      = _cfg.getint('variability', 'minpeaks', fallback=2)
+minplotpoints = _cfg.getint('variability', 'minplotpoints', fallback=5)
+make_plots    = _cfg.getboolean('variability', 'make_plots', fallback=False)
+chatter       = _cfg.getint('variability', 'chatter', fallback=2)
+
+# --- Column names ---
+RA2000 = _cfg.get('columns', 'ra2000', fallback="RAJ2000Ep2000")
+DE2000 = _cfg.get('columns', 'de2000', fallback="DEJ2000Ep2000")
+
+# --- Derived paths ---
+bad_obsidfile  = workdir + "remove_obsidfile_list1.txt"
+bad_obsidfile2 = workdir + "bad_obsids_gaiavar.txt"
+bad_obsidfile3 = workdir + "bad_obsids_gaiavar+filter.txt"
+gaiavarStats   = "_gaiavarStats.txt"
+tracing_log    = workdir + 'tracing.txt'
+var_lc         = workdir
+
+# --- Log file handle ---
+# Deferred opening: only open when workdir exists, otherwise use devnull
+if os.path.isdir(workdir):
+    wntg = open(workdir + "details4wntg.txt", "w")
+else:
+    import warnings
+    warnings.warn(
+        f"[xmm2athena] workdir '{workdir}' does not exist. "
+        f"Log file 'details4wntg.txt' will not be written. "
+        f"Create the directory or update xmm2athena_config.ini.",
+        stacklevel=2,
+    )
+    wntg = open(os.devnull, "w")
+
+##########################################################################################
 
 
 def mjd2epoch(mjd):
@@ -151,32 +164,28 @@ def apply_proper_motion(ra_eDR3,dec_eDR3,ref_epoch,pmra,pmde,obs_epoch):
     
 
 def degrees2sexagesimal(ra,dec,as_string=False):
-       ''' 
-       
-   simple code to convert RA, Dec from decimal degrees to sexigesimal
-   
-   input ra, dec in decimal degrees
-   output ra,dec in sexagesimal strings
-       '''
-       import numpy as np
-   
-       ra = np.mod(ra,360.0) # 0<= ra < 360, positive
-       rah=int(ra/15.)
-       ram=int( (ra/15.-rah)*60.)
-       ras=(ra/15.-rah-ram/60.)*3600
-       newra="%02i:%02i:%05.2f" % (rah,np.abs(ram),np.abs(ras)) 
-   
-       sdec = np.sign(dec)
-       ded=int(dec)
-       dem=int((dec-ded)*60.)
-       des=np.abs((dec-ded-dem/60.)*3600)
-       ded=sdec*np.abs(ded)
-       dem=np.abs(dem)
-       newdec="%02i:%02i:%04.1f"%(ded,dem,des) 
-       if as_string: 
-          return newra,newdec
-       else: 
-          return rah,ram,ras,ded,dem,des
+    """Simple code to convert RA, Dec from decimal degrees to sexagesimal.
+
+    input ra, dec in decimal degrees
+    output ra,dec in sexagesimal strings
+    """
+    ra = np.mod(ra,360.0) # 0<= ra < 360, positive
+    rah=int(ra/15.)
+    ram=int( (ra/15.-rah)*60.)
+    ras=(ra/15.-rah-ram/60.)*3600
+    newra="%02i:%02i:%05.2f" % (rah,np.abs(ram),np.abs(ras))
+
+    sdec = np.sign(dec)
+    ded=int(dec)
+    dem=int((dec-ded)*60.)
+    des=np.abs((dec-ded-dem/60.)*3600)
+    ded=sdec*np.abs(ded)
+    dem=np.abs(dem)
+    newdec="%02i:%02i:%04.1f"%(ded,dem,des)
+    if as_string:
+        return newra,newdec
+    else:
+        return rah,ram,ras,ded,dem,des
 
 def bary_centric_correction_to_SUMMARY(
       suss = '/data/catalogs/XMM-OM-SUSS5.0.fits',
@@ -333,12 +342,12 @@ def _add_epoch_col():
    return g,obs_epoch,pos_epoch
 
 
-def write(outputlist):   
-   xo = open( output, 'w')
-   for r in outputlist: 
-       xo.write(r,'\n')
-   xo.close()
-   print (f"outputlist written to {output}")
+def write(outputlist, output='xmatch_GaiaEDR3_PM.gt.30_SUSS5.0.dat'):
+   from astropy.table import Table
+   with open(output, 'w') as xo:
+       for r in outputlist:
+           xo.write(f"{r}\n")
+   print(f"outputlist written to {output}")
    restab = Table(outputlist)
    restab.write('xmatch_GaiaEDR3_PM.gt.30_SUSS5.0.fits',overwrite=True)
    
@@ -559,8 +568,8 @@ def astrometry_match(obsid_bad,obsid_good,root='/Users/data/XMM/',workdir=None,d
         for x8 in a8:
            if '.TAR' in x8:
                os.system(f"cd {odfdir} ;tar xf {odfdir}{x8}")
-    except:
-        pass    
+    except (OSError, FileNotFoundError) as e:
+        print(f"Warning: could not unpack ODF files: {e}")
     
     print (f"\nrunning catcorr on {obsid_bad} using {obsid_good}")
     run_catcorr(bad_obsmli_,goodfile,bad_obsmli_dir,mingood=2,syserr=1.0,maxoffset=10.0,V=7)
@@ -960,14 +969,14 @@ def _fix_corrupted_cols(col,err="--",fill=np.nan,nozeros=True):
     xa.fill_value = fill
     xav = xa.data
     xam = xa.mask
-    try: # skip if number
+    try: # skip if column is numeric (comparison to string err will fail)
         q = np.where(xav == err)
-        # set mask 
+        # set mask
         xam[q] = True
         # set values
         xav[q] = fill
-    except:
-        pass    
+    except (TypeError, ValueError):
+        pass  # column is already numeric, no string cleanup needed
     if nozeros:
        xav = np.asarray(xav,dtype=float)
        xam[xav == 0] = True
@@ -1011,11 +1020,12 @@ def fix_corruped(table,fill=None,nozeros=True):
  
     
 
-def make_file_variable( band=band, minnumber=minnumber, maxnumber=1000, 
-         chi2_red_min=chi2_red_min, 
+def make_file_variable( band=band, minnumber=minnumber, maxnumber=1000,
+         chi2_red_min=chi2_red_min,
          inputdir=inputdir,
-         inputcat=inputcat, 
-         selectrecs=[0,60000000.], plotit=make_plots, 
+         inputcat=inputcat,
+         sussep=sussep,
+         selectrecs=[0,60000000.], plotit=make_plots,
          onlyqualzero=onlyqualzero,
          min_srcdist=min_srcdist,
          bad_obsidfile=bad_obsidfile,
@@ -1076,10 +1086,14 @@ def make_file_variable( band=band, minnumber=minnumber, maxnumber=1000,
     brieffh = open(brief,"a")
     brieffh.write(f"IAUNAME  RA Dec  filename\n")
 
-    indir = inputdir 
-    suss =  '../../XMM-OM-SUSS5.0ep.fits'
-    varfile = inputcat # "XMM-OM-SUSS5.0ep_singlerecs_v2_srcnum_aux_stage2_v2b.fits"
-    fsuss = fits.open(indir+suss)
+    indir = inputdir
+    # sussep: raw SUSS+epoch file (absolute path, or relative to inputdir)
+    if os.path.isabs(sussep):
+        suss_path = sussep
+    else:
+        suss_path = os.path.join(indir, sussep)
+    varfile = inputcat
+    fsuss = fits.open(suss_path)
     print ("SUSS opened")
     # 
     t = Table(fsuss[1].data)   # this is the SUSS5.0 file + obs_epoch
@@ -1415,19 +1429,19 @@ def single_obsid_for_srcnum(t, filt, bad_obsids=[],chatter=0):
     return tout
     
 
-def remove_problematic_extended_and_not_variables(extendedProblemFile):
+def remove_problematic_extended_and_not_variables(extendedProblemFile, lcdir=None):
     """
     The OM may have observed sources and sometimes classified them as extended, sometimes
     as not. This may affect for example compact galaxies depending on the exposure time
-    or filter. These need to be identified and filtered out of the db of variable sources. 
-    
-    
+    or filter. These need to be identified and filtered out of the db of variable sources.
     """
     import os
     from astropy.io import fits
-    from astropy.table import table
-    
-    files = os.listdir('/Volumes/DATA11/data/catalogs/suss_gaia_epic/var_lc/')
+    from astropy.table import Table
+
+    if lcdir is None:
+        lcdir = var_lc
+    files = os.listdir(lcdir)
 
     with open(extendedProblemFile,'w') as pf: 
         for file in files:
@@ -1567,7 +1581,7 @@ def plot_lc(lcfile,simbad=False,minpnts=minplotpoints,noplot=False):
                 logg=f"{pa['logg'][0]:.2f}"
                 try:
                     fe=  f"{pa['[Fe/H]'][0]:.2f}"
-                except:    
+                except KeyError:
                     fe=  f"{pa['FeAbundance'][0]:.2f}"
                 dist=f"{pa['Dist'][0]:.0f}"
                 AG=  f"{pa['AG'][0]:.2f}"
@@ -1672,37 +1686,35 @@ def make_sed(t):
                                                               
 
 def fix_multiples(cat="v3/XMM-OM-SUSS5.0ep_singlerecs_v2_7291gal_7294qso.fits",
-    indir='/Volumes/DATA11/data/catalogs/suss_gaia_epic/',cols=["SRCNUMS","OBSIDS","EPOCHS"]):
+    indir=inputdir, cols=["SRCNUMS","OBSIDS","EPOCHS"]):
     """
     clean up the OBSIDS, EPOCHS, SRCNUMS columns by removing duplicates
     assumes only one table in file
-    
+
     2024-01-02 Decided not to do that for the main enhances/auxil +gaia file
-    
+
     """
     from astropy.table import Table
     t = Table.read(indir+cat)
-    print (f'finished reading {cat}')
-    for name in col: 
+    print(f'finished reading {cat}')
+    for name in cols:
         c = t[name]
-        for r in c: 
+        for r in c:
             xxx = r.split("_")
-            r = np.unique(xxx) 
+            r = np.unique(xxx)
             # assumes this updates c value
         t[name] = c
         # assume this updates t
     t.write(indir+cat+".1")
-    # rename to originan file if OK after check
+    # rename to original file if OK after check
      
 
 def classify_light_curve(time, flux, err, fig, noplot):
     # 'flux, err are AB mags
     # for plot_lc calls 2024-02-16
-    import numpy as np
     from astropy import units as u
     from astropy.timeseries import LombScargle
     from astroML.time_series import lomb_scargle, lomb_scargle_bootstrap
-    from astropy import units as u
     
     # offset time by launch time (obs_epoch) 
     time = (time - 1995.0) # * u.yr  # unit = years
@@ -1730,12 +1742,11 @@ def classify_light_curve(time, flux, err, fig, noplot):
     period = 1./max_power_freq
     try:
        max_significance_freq = FAP = frequency[np.argmax(significance)]
-       print (f"max power freq at={max_power_freq}\tperiod={period}")
-       print (f"max significance freq at {max_significance_freq}")
-    except:
+       print(f"max power freq at={max_power_freq}\tperiod={period}")
+       print(f"max significance freq at {max_significance_freq}")
+    except (ValueError, IndexError):
        max_significance_freq = FAP = 99.
-       print (f"2423 skipping Lomb-Scargle ")
-       pass   
+       print("skipping Lomb-Scargle (insufficient data or empty significance array)")
     
     #  astropy v6 ?  FAP = LS.false_alarm_probability(power.max(),method='bootstrap')   
     
@@ -1808,14 +1819,15 @@ def concatenate_variable_sussfiles(
     t0.write(f"{indir}/../concatenated_variable_sussfiles.fits")
  
 def preprocessing(
-        minnumber=minnumber,  
-        chi2_red_min=chi2_red_min, 
-        inputdir=inputdir, #'/Volumes/DATA11/data/catalogs/suss_gaia_epic/v3/',
-        inputcat=inputcat, #"XMM-OM-SUSS5.0ep_singlerecs_v4_classified_v6_UVqual=0.fits",
+        minnumber=minnumber,
+        chi2_red_min=chi2_red_min,
+        inputdir=inputdir,
+        inputcat=inputcat,
+        sussep=sussep,
         onlyqualzero=onlyqualzero,
         min_srcdist=min_srcdist,
         chatter=chatter,
-        minpnts=minnumber, 
+        minpnts=minnumber,
         threesigma=chi2_red_min,
         catversion=catversion,
     ): 
@@ -1910,13 +1922,14 @@ main_type=="QSO"|main_type=="AGN"|main_type=="BLLAC"|main_type=="Blazar"|main_ty
             min_srcdist=min_srcdist,
             inputdir=inputdir,
             inputcat=inputcat,
+            sussep=sussep,
             )
     wntg.write (f"preprocessing: Writing the list of X*.fits files as allsources.txt\n")        
     os.system(f"ls -1 X*.fits > allsources.txt")
     #
     # make catalogue for selection - match allsources.txt to inputcat
     #
-    TOPCATPATH = "/Users/kuin/bin" 
+    # TOPCATPATH is set from config at module level
     print('match')
     # match 
     in1 = "allsources.txt"
@@ -1967,140 +1980,33 @@ def post_process_variables1(
     threesigma=chi2_red_min,
     ):
     """
-    What post-processing is being done:
-    
-    first extract the set of light curves for selected sources
-    
-    The selection criteria are:
-       1. data quality good: <band>_quality_flag=0
-       2. more than 5 good quality observations
-       3. distance to nearest source > 6"
-       4. chi-squared-reduced > 5
-       
-    mkdir var_lc
-    
-    do in ipython:
-    from cats import xmm2athena as xmm2
-    xmm2.make_file_variable(band='uvw2',chi2_red_min=5.,minnumber=5,min_srcdist=6.)
-    xmm2.make_file_variable(band='uvm2',chi2_red_min=5.,minnumber=5,min_srcdist=6.,chatter=3)
-    xmm2.make_file_variable(band='uvw1',chi2_red_min=5.,minnumber=5,min_srcdist=6.,chatter=3)
-    xmm2.make_file_variable(band='u',chi2_red_min=5.,minnumber=5,min_srcdist=6.,chatter=3)
-    xmm2.make_file_variable(band='b',chi2_red_min=5.,minnumber=5,min_srcdist=6.,chatter=3)
-    xmm2.make_file_variable(band='v',chi2_red_min=5.,minnumber=5,min_srcdist=6.,chatter=3)
-   
-    found 3448 sources (w2:263,m2:150,w1:1278,u:702,b:506,v:549)  
-    
-    where def make_file_variable( band='uvw1', minnumber=10, maxnumber=1000, 
-         chi2_red_min=5., 
-         inputdir='/Volumes/DATA11/data/catalogs/suss_gaia_epic/v3/',
-            ##inputcat="XMM-OM-SUSS5.0ep_singlerecs_v4_classified_v6xSIMBAD.fits.gz",
-         inputcat="XMM-OM-SUSS5.0ep_singlerecs_v4_classified_v6.fits",
-         selectrecs=[0,60000000.], plotit=False, onlyqualzero=False,
-         min_srcdist=6.0,
-         chatter=2):
-   
-    in shell do: 
-    cd var_lc
-    ls -1  *.fits > allsources.txt
-    
-    in topcat edit allsources.txt:
-    topcat: new col; test=split(col1,"_"); name=concat(test[0]," ",test[1])
-    rename col1 filename
-    
-    Select all sources in 
-        inputcat="XMM-OM-SUSS5.0ep_singlerecs_v4_classified_v6.fits",
-    which match allsources.txt (but need to replace _ with " " in name
-        match with all from allsources.txt: name , filename 
-        => SimbadxSUSS5_variable_sources_v8.fits
-    use "best match for each table 1 row" and "all from 1"     
-    
-    match this to CDS/GaiaVarSumm to find matches to Gaia variables 
-    add column GaiaVar after using a match to Gaia Var in topcat and retaining the 
-        object variable classification, and Gmagmean for selection as GaiaVar
-    add column SimbadVar for the match to Simbad variables (see below for the selection)
-    --> 268 vars (out 3448) 7.7%
-    
-    match this to Simbad 
-    
-    select from Simbad/Main_type the variable types identified by Ada
-    main_type=="QSO"|main_type=="AGN"|main_type=="BLLAC"|main_type=="Blazar"|
-    main_type=="SN"|main_type=="**"|main_type=="EB*"|main_type=="Cepheid"|
-    main_type=="AeBe"|main_type=="BYDra"|main_type=="Eruptive"|main_type=="XRB"|
-    main_type=="LPV"|main_type=="Mira"|main_type=="OrionV"|main_type=="Nova"|
-    main_type=="Pulsating*"|main_type=="Pulsar"|main_type=="Variable"|
-    main_type=="HMXB"|main_type=="RRLyr"|main_type=="Rotation"|
-    main_type=="SpBinaries"|main_type=="Symbiotic*"|main_type=="YSO"|
-           or:
-main_type=="QSO"|main_type=="AGN"|main_type=="BLLAC"|main_type=="Blazar"|main_type=="SN"|main_type=="**"|main_type=="EB*"|main_type=="Cepheid"|main_type=="AeBe"|main_type=="BYDra"|main_type=="Eruptive"|main_type=="XRB"|main_type=="LPV"|main_type=="Mira"|main_type=="OrionV"|main_type=="Nova"|main_type=="Pulsating*"|main_type=="Pulsar"|main_type=="Variable"|main_type=="HMXB"|main_type=="RRLyr"|main_type=="Rotation"|main_type=="SpBinaries"|main_type=="Symbiotic*"|main_type=="YSO"
+    Post-process variable source selection to remove false positives.
 
-    
-    -> 174 variables (out of 3448) much overlap with GaiaVar
-    add SimbadVar, GaiaVar boolean columns
-    
-    save the catalogue file:
-        => SimbadxSUSS5_variable_sources_vXX.fits
-  - - - -      
-    Remove obsids which have maximum brightness (~3sigma from median or > 1mag) in 
-    multiple sources or have a dimming in excess (~3sigma or > 0.2 mag)in multiple 
-    sources for the same obsid. (see code below) 
-      ... 5 sigme does not find any multiple sources with same obsid
-    
-    -> write a file with bad obsids. 
-    -> rerun the above with the bad obsids input file   
-       the copy of the input file (temp_file.fits) has been updated  
-    -> remove the XMM*.fits files 
-       check the bad_obsids.txt file
-    now we have hopefully culled the obsids which were systematically high or low. 
-    
-    -> rerun make_file_variable() with indir = './' and inputcat='temp_file.fits'
-    
-    Update the above fits files per source, then the following:    
-        
-    for each source, 
-       for each of its OBSIDs 
-          find the number of sources with that obsid -> list
-       take the maximum number of sources within that list 
-    => source, ra, dec, number of sources 
-          
-    compare all sources to those flagged as Gaia Variables to determine maximum 
-    number of sources acceptable within an obsid
-    
-    remove the sources which exceed the maximum number 
-    
-    Remove obsids which have > 20 Var Srcs of which < 20% are Gaia Variable
-    
-    rerun the above => v9 
-    
-    make a list of obsids where there is a significant brightening, and then 
-    make a histogram of the number of sources with brightning per obsid.
-    
-    
-    ========================
-    further post-processing: 
-    
-    match to nearby galaxies and remove sources which are inside the galaxy 
-    
-    match to bright nebulae and remove sources 
-    
-    Paired correlated lightcurves: might be because of scattered light features
-    limit search for source correlation to other source that have a matched obsid
-    output source, matched source, obsid with the high point? 
-    
-    More general approach:
-    for all sources 
-       for each obsid 
-           compute the correlation with random 2 other sources within a 50(tbd) arcsec radius
-    -> source, obsid, correlation
-    sort by obsid       
-    for high correlations in an obsid, 
-       select its sources 
-          select for each source the obsids
-              remove one obsid at a time and compute the correlation/chi-squared
-              a significant? drop will flag the obsid which causes the flare
-          find out which of the same obsid causes a flare in all sources
-          remove such an obsid from all light curves (reprocess)
-          
-              
+    This function performs a multi-step cleaning pipeline:
+
+    STEP 1: For each variable source, identify obsids with anomalous peaks
+    (>threesigma above median). If multiple sources show peaks in the same
+    obsid, flag that obsid as bad (likely a systematic issue, e.g. scattered
+    light). Update the catalogue to remove bad obsids and re-extract light
+    curves.
+
+    STEP 2: For each obsid, count how many variable sources it contains and
+    how many are Gaia Variables. Obsids with >20 variable sources but <20%
+    Gaia Variable fraction are culled (likely spurious field-wide variability).
+    Re-extract light curves again with this additional filter.
+
+    Optionally generates light curve plots for all surviving sources.
+
+    See preprocessing() docstring for the full pipeline context.
+
+    Returns
+    -------
+    bad_obsid : list
+        List of culled obsid strings.
+    results : list
+        Per-source metadata [source, filename, obsids, ra, dec, band].
+    source_results : dict
+        Per-filter statistics [band, max(n_src), n_src_list, n_gaiavar_list, obsid_list].
     """
     from astropy.table import Table
     from astropy.io import fits
@@ -2225,9 +2131,9 @@ main_type=="QSO"|main_type=="AGN"|main_type=="BLLAC"|main_type=="Blazar"|main_ty
               op3.append(a8[2])    # filename
               if type(a8[3]) == np.float64: op4.append(a8[3])
               else: op4.append(a8[3][0])    # epoch
-        except:
-           print ("RUNTIME ERROR: 2217 ")
-           return obspeaks, results, op1, op2, op3, op4, a8      
+        except (IndexError, TypeError, ValueError) as e:
+           print(f"RUNTIME ERROR in obspeaks reformatting for filter {bf}: {e}")
+           return obspeaks, results, op1, op2, op3, op4, a8
         obspeak =  np.array([op1,op2,op3,op4])   
         pkobs,pkindex,peakcount=np.unique(obspeak[0],return_index=True, return_counts=True)
         uniq_obspeak[bf] = pkobs
@@ -2495,26 +2401,16 @@ main_type=="QSO"|main_type=="AGN"|main_type=="BLLAC"|main_type=="Blazar"|main_ty
             while trynumber < 4:
                 try:
                     plot_lc(file,simbad=False,minpnts=minpnts,noplot=False)
-            # xmm2.plot_lc(lcfile.split("\n")[0],simbad=False,minpnts=minpnts,noplot=False)
                     trynumber=10
-                except:
-                    plot_lc(file,simbad=False,minpnts=minpnts,noplot=False)
+                except (OSError, ValueError, KeyError) as e:
+                    print(f"Warning: plot_lc attempt {trynumber} failed for {file}: {e}")
                     trynumber+=1
-                    pass          
     else:
         wntg.write(f"plots are not selected in input; call plot_lc() for each file in newfiles.txt\n\n ")
-    # repeat earlier code with 'file3' to recompute n_all, n_gaia (not implemented here) 
-    print (f"returns bad_obsid, results, source_results :\n   [band, np.max(n_src_list), n_src_list, n_gaiavar_list, id_obsid_list]")                            
-    return  bad_obsid, results, source_results
-  
-    print ("WARNING: remember to call close_wntg() to close the log!!!!")   
-    print ("WARNING: remember to call close_wntg() to close the log!!!!")   
-    print ("WARNING: remember to call close_wntg() to close the log!!!!")   
- # end post processing                               
-
- # end post processing                               
-
- # end post processing                               
+    # repeat earlier code with 'file3' to recompute n_all, n_gaia (not implemented here)
+    print(f"returns bad_obsid, results, source_results :\n   [band, np.max(n_src_list), n_src_list, n_gaiavar_list, id_obsid_list]")
+    print("WARNING: remember to call close_wntg() to close the log!")
+    return bad_obsid, results, source_results
 
 def close_wntg():
     wntg.close()

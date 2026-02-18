@@ -1,0 +1,21 @@
+# XMM2athena-OM dependencies
+# Core scientific stack
+numpy
+astropy
+scipy
+matplotlib
+
+# Machine learning (used in classification KDE)
+scikit-learn
+
+# Astronomy-specific
+astroquery
+astroML
+cdshealpix
+
+# Configuration & utilities
+pyyaml
+tqdm
+
+# Optional: for Swift cross-matching (used in check_swift)
+# swifttools

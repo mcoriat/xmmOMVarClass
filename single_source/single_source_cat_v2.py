@@ -42,6 +42,7 @@ __version__ = 2.1
 ########################################################################################
 # globals
 import os
+import configparser
 import numpy as np
 import numpy.ma as ma
 import astropy, numpy
@@ -50,7 +51,19 @@ from astropy.table import Table, Column, MaskedColumn
 
 # updates: return list of obsids, epochs [can be used to search for original records)
 #  return median, skew, etc.
-# not yet: ABmag upper limits from SUMMARY 
+# not yet: ABmag upper limits from SUMMARY
+
+# --- Load config ---
+def _load_ssc_config():
+    """Load configuration from config.ini if it exists."""
+    config = configparser.ConfigParser()
+    module_dir = os.path.dirname(os.path.abspath(__file__))
+    config_path = os.path.join(module_dir, 'config.ini')
+    if os.path.exists(config_path):
+        config.read(config_path)
+    return config
+
+_ssc_cfg = _load_ssc_config()
 
 # define globals:
 
@@ -65,23 +78,26 @@ bands=['UVW2','UVM2','UVW1','U','B','V']  # I think White is absent
 catalog = "SUSS" #'testsuss' #'SUSS'
 outtable = None
 
+_ROOT = _ssc_cfg.get('DEFAULT', 'ROOT', fallback='/Volumes/DATA11/')
+
 if catalog == 'SUSS':
-    rootobs = '/Volumes/DATA11/data/catalogs/test_2/'
-    chunk = "sussxgaiadr3_ep2000.fits"   
-    sussdir= '/Volumes/DATA11/data/catalogs/suss6./'
-    suss='XMM-OM-SUSS6.2.fits'
-    summary_file = "suss_summary.fits"
+    rootobs = _ssc_cfg.get('DEFAULT', 'rootobs',
+        fallback=os.path.join(_ROOT, 'data/catalogs/test_2/'))
+    chunk = _ssc_cfg.get('DEFAULT', 'chunk', fallback="sussxgaiadr3_ep2000.fits")
+    sussdir = _ssc_cfg.get('DEFAULT', 'sussdir',
+        fallback=os.path.join(_ROOT, 'data/catalogs/suss6./'))
+    suss = _ssc_cfg.get('DEFAULT', 'suss', fallback='XMM-OM-SUSS6.2.fits')
+    summary_file = _ssc_cfg.get('DEFAULT', 'suss_summary', fallback="suss_summary.fits")
 elif catalog == 'UVOTSSC2':
     rootobs = '/Users/data/catalogs/uvotssc2/'
-    chunk =  'uvotssc2_in_photometry.fits'  
-    #'uvotssc2_in_photometry.fits'  'test_main_in500k.fits' 
-    # combine the files in  one with fix_uvotssc2.combine_input_files
+    chunk =  'uvotssc2_in_photometry.fits'
 elif catalog == 'test':
-    rootobs = '/Users/data/catalogs/uvotssc2/'
+    rootobs = _ssc_cfg.get('DEFAULT', 'test_dir',
+        fallback='/Users/data/catalogs/uvotssc2/')
     chunk = 'test_sources.fits'
 elif catalog == 'testsuss':
-    rootobs = '/Volumes/DATA11/data/catalogs/test/'
-    chunk = "sussxgaiadr3_ep2000.fits"   
+    rootobs = os.path.join(_ROOT, 'data/catalogs/test/')
+    chunk = "sussxgaiadr3_ep2000.fits"
     summary_file = "test_cat_summary.fits"
 
 #output file name is by appending "_singlerecs" to input file name (see fileio() ).
