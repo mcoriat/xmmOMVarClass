@@ -1,2 +1,25 @@
-*.fits
 .DS_Store
+__pycache__/
+*.pyc
+
+# Large data files — do not track in git
+*.fits
+*.fits.gz
+*.csv
+*.dat
+
+# Keep small text reference files in claxboi
+!claxboi/suss_with_training.in
+!claxboi/otherhalf.dat
+
+# Archive directory (for cleanup review)
+_archive/
+
+# Virtual environments (if created inside repo)
+venv/
+.venv/
+venvOM/
+
+# Log files
+*.log
+pipeline_*.log

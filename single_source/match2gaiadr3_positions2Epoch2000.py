@@ -87,6 +87,53 @@ from astropy.coordinates import SkyCoord
 #    from astroquery.gaia import Gaia
 from astropy.io import fits, ascii as ioascii
 from cdshealpix import nested
+from collections import namedtuple
+
+##############################
+#  Parallelization helpers   #
+##############################
+
+# Picklable data containers (replacements for objects with open file handles)
+XcatData = namedtuple('XcatData', ['table', 'healpix', 'depth'])
+PointingData = namedtuple('PointingData', ['obsid', 'ra', 'dec'])
+
+
+def lookup_pointing(pointing_data, obsid_in):
+    """Look up (ra_pnt, dec_pnt) for an OBSID. Replaces pointing_of_observation.obspnt()."""
+    q = pointing_data.obsid == obsid_in
+    if q.sum() == 0:
+        return np.nan, np.nan
+    return float(pointing_data.ra[q][0]), float(pointing_data.dec[q][0])
+
+
+def get_healpix_tiles(pos, depth):
+    """Get HEALPix tile + neighbours for a sky position. Replaces xcat.get_records()."""
+    cpix = nested.skycoord_to_healpix(pos, depth)
+    pixes = nested.neighbours(cpix, depth)
+    return pixes
+
+
+def build_pointing_data(rootobs, chunks, catalog='SUSS'):
+    """Build PointingData from the SUSS summary extension (read once)."""
+    if catalog == 'UVOTSSC2':
+        all_obsid, all_ra, all_dec = [], [], []
+        for bit in chunks:
+            t = Table(fits.getdata(rootobs + bit, ext=2))
+            all_obsid.append(np.array(t['OBSID']))
+            all_ra.append(np.array(t['RA_PNT']))
+            all_dec.append(np.array(t['DEC_PNT']))
+        return PointingData(
+            obsid=np.concatenate(all_obsid),
+            ra=np.concatenate(all_ra),
+            dec=np.concatenate(all_dec))
+    else:
+        t = Table(fits.getdata(rootobs + chunks[0], ext=2))
+        t.sort('OBSID')
+        return PointingData(
+            obsid=np.array(t['OBSID']),
+            ra=np.array(t['RA_PNT']),
+            dec=np.array(t['DEC_PNT']))
+
 
 ########################
 #  Global definitions  #
@@ -96,7 +143,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__))) + '/'  # repo
 TOPCATPATH = "stilts"  # stilts is in PATH (/opt/homebrew/bin/stilts)
 work = os.getcwd()+"/"
 
-gaiacat  = ROOT+'gaiadr3_pmgt25.fits'
+gaiacat  = ROOT+'data/gaiadr3_pmgt25.fits'
 gaiapath = ROOT+'output/gaiadr3_PM/' # store here the split up cat.
 gaiaHP   = ROOT+'output/gaiadr3_healpix.fits' # gaiacat with healpix col.
 gaiaObsidTable = work+'/gaiadr3_obsid_tiles.fits'
@@ -118,7 +165,7 @@ do_epoch    = True #True if running for first time on chunks
 prints2file = False #TBD not implemented
 
 if catalog == 'SUSS':
-   rootobs    = ROOT
+   rootobs    = ROOT+'data/'
    chunks     = ['XMM-OM-SUSS6.1.fits']
    match_par  = 2.5  # see line 471: typical positional error in Gaia DR3 match is 2.5 
 elif catalog == 'UVOTSSC2':
@@ -934,83 +981,298 @@ def  processGaiaPM2(rootobs,chunks=None, xcat=None, obsids=None, chatter=1):
     t2 = time.time()
     print (f"Elapsed time subsetting Gaia = {t2-t1}\n")
 
-  
-def mainx():
+
+###################################
+#  Parallelization infrastructure #
+###################################
+
+def pre_slice_epochs(rootobs, chunks, catalog, epoch_array, epoch_step):
+    """Read the SUSS catalogue once and return per-epoch subsets.
+
+    Returns
+    -------
+    dict : {round(ep1,1): (astropy.Table subset, list of obsids)}
+    """
+    print("Pre-slicing SUSS catalogue by epoch (single read)...")
+    t0 = time.time()
+    keepcol = ['IAUNAME', 'OBSID', 'SRCNUM', 'RA', 'DEC', 'POSERR', 'obs_epoch']
+    all_tables = []
+    for bit in chunks:
+        d = fits.open(rootobs + bit)
+        td = Table(d[1].data)
+        if not (catalog in ('SUSS', 'test2')):
+            td.add_column(np.max([td['RA_ERR'], td['DEC_ERR']]), name='POSERR')
+            td = td[keepcol]
+        td.sort('obs_epoch')
+        all_tables.append(td)
+        d.close()
+    if len(all_tables) > 1:
+        full_table = vstack(all_tables, join_type='exact')
+    else:
+        full_table = all_tables[0]
+
+    epoch_slices = {}
+    n_epochs = len(epoch_array) - 1
+    for k in range(n_epochs):
+        ep1 = epoch_array[k]
+        ep2 = ep1 + epoch_step
+        q = (full_table['obs_epoch'] >= ep1) & (full_table['obs_epoch'] < ep2)
+        if q.sum() == 0:
+            continue
+        subset = full_table[q]
+        # unique obsids
+        ox = np.array(subset['OBSID'])
+        ox_sorted = np.sort(ox)
+        obsids = list(dict.fromkeys(ox_sorted))
+        epoch_slices[round(ep1, 1)] = (subset, obsids)
+
+    print(f"Pre-slicing complete: {len(epoch_slices)} non-empty epochs "
+          f"in {time.time()-t0:.1f}s")
+    return epoch_slices
+
+
+def _process_gaia_pm_for_epoch(xcat_data, pointing_data, obsids, chunks, rootobs,
+                                local_gaia_temp_cat, local_gaiaObsidTable):
+    """Select Gaia PM sources for one epoch using HEALPix tiles.
+
+    Standalone version of processGaiaPM2() that uses picklable data.
+    """
+    t1 = time.time()
+    n_obsid = 0
+    tiles = []
+    obsidTiles = []
+    for bit in chunks:
+        for ox in obsids:
+            ra_pnt, dec_pnt = lookup_pointing(pointing_data, ox)
+            if np.isfinite(ra_pnt):
+                row = [ox]
+                n_obsid += 1
+                pos = SkyCoord(ra_pnt * u.deg, dec_pnt * u.deg, frame='icrs')
+                pixes = get_healpix_tiles(pos, xcat_data.depth)[0]
+                for p in pixes:
+                    row.append(p)
+                    tiles.append(p)
+                if len(pixes) < 9:
+                    for p in range(len(pixes) - 9):
+                        row.append(None)
+                        tiles.append(None)
+        obsidTiles.append(row)
+    onames = ['obsid', 'pix1', 'pix2', 'pix3', 'pix4',
+              'pix5', 'pix6', 'pix7', 'pix8', 'pix9']
+    obsidTiles = np.asarray(obsidTiles)
+    obsidTable = Table(data=obsidTiles, names=onames)
+
+    # unique tiles
+    tiles.sort()
+    yr = [tiles[0]]
+    a = tiles[0]
+    for b in tiles[1:]:
+        if b != a:
+            yr.append(b)
+            a = b
+    tiles = yr
+
+    # extract Gaia records for these tiles
+    allrecs = []
+    for p in tiles:
+        x = xcat_data.table[xcat_data.healpix == p]
+        allrecs.append(x)
+    tab = vstack(allrecs)
+
+    obsidTable.write(local_gaiaObsidTable, overwrite=True)
+    tab.write(local_gaia_temp_cat, overwrite=True)
+    t2 = time.time()
+    print(f"Elapsed time subsetting Gaia = {t2 - t1:.1f}s")
+
+
+def _process_single_epoch(args):
+    """Worker function: process one epoch end-to-end in an isolated directory.
+
+    Parameters
+    ----------
+    args : tuple
+        (ep1, ep2, epoch_table, obsids, xcat_data, pointing_data,
+         worker_dir, main_work_dir, rootobs, chunks_list, gaia_epoch)
+    """
+    (ep1, ep2, epoch_table, obsids, xcat_data, pointing_data,
+     worker_dir, main_work_dir, rootobs, chunks_list, gaia_epoch) = args
+
+    t1 = time.time()
+    os.makedirs(worker_dir, exist_ok=True)
+    original_dir = os.getcwd()
+    os.chdir(worker_dir)
+
+    try:
+        # Step 1: write epoch slice
+        local_obs_cat = os.path.join(worker_dir, 'epoch_slice_cat.fits')
+        epoch_table.write(local_obs_cat, overwrite=True)
+        print(f"[{ep1:.1f}] {len(epoch_table)} rows, {len(obsids)} obsids")
+
+        # Step 2: select Gaia PM sources for this epoch
+        local_gaia_temp = os.path.join(worker_dir, 'gaiadr3_selected_4epoch.fits')
+        local_obsid_table = os.path.join(worker_dir, 'gaiadr3_obsid_tiles.fits')
+        _process_gaia_pm_for_epoch(
+            xcat_data, pointing_data, obsids, chunks_list, rootobs,
+            local_gaia_temp, local_obsid_table)
+
+        # Step 3: match to Gaia (STILTS uses relative paths -> resolves under worker_dir)
+        merged_out = f"cat_out_{ep1:06.1f}.fits"
+        match2gaia_cat(
+            root='.', catin=local_obs_cat,
+            cat_matched='matched.fits', cat_nomatch='nomatch.fits',
+            gaia_epoch=gaia_epoch,
+            obsEpochRange=[ep1, ep2], toEpochs=[2000.0],
+            gaia_cat=local_gaia_temp, outputf=merged_out)
+
+        # Step 4: move final outputs to main directory
+        for suffix in ['-1.fits', '-2.fits']:
+            src = os.path.join(worker_dir, f"cat_out_{ep1:06.1f}" + suffix)
+            dst = os.path.join(main_work_dir, f"cat_out_{ep1:06.1f}" + suffix)
+            if os.path.exists(src):
+                os.rename(src, dst)
+
+        # Step 5: clean up worker temp files
+        for f in os.listdir(worker_dir):
+            fpath = os.path.join(worker_dir, f)
+            if os.path.isfile(fpath):
+                os.remove(fpath)
+
+        elapsed = time.time() - t1
+        print(f"[{ep1:.1f}] completed in {elapsed:.1f}s")
+        return (ep1, True, elapsed, None)
+
+    except Exception as e:
+        import traceback
+        elapsed = time.time() - t1
+        errmsg = traceback.format_exc()
+        print(f"[{ep1:.1f}] FAILED after {elapsed:.1f}s: {e}")
+        return (ep1, False, elapsed, errmsg)
+    finally:
+        os.chdir(original_dir)
+
+
+def mainx(n_workers=1):
+    """Main processing: match SUSS epochs to Gaia DR3.
+
+    Parameters
+    ----------
+    n_workers : int
+        Number of parallel workers (default 1 = sequential).
+    """
+    import shutil
+
+    t_total = time.time()
+
     # initialise xcat
-    print (f"initialising the Gaia catalogue bits")
+    print("initialising the Gaia catalogue bits")
     if use_healpix:
         try:
-            xcat = healpix_catalogue(gaiaHP, None, ext=1 )
+            xcat = healpix_catalogue(gaiaHP, None, ext=1)
         except (FileNotFoundError, RuntimeError, OSError):
             print(f"HEALPix catalogue not found at {gaiaHP}, building from {gaiacat}...")
             xcat = healpix_catalogue(gaiacat, gaiaHP, ext=1, hpcat=False)
             xcat.add_healpixno()
             print(f"HEALPix catalogue saved to {gaiaHP}")
     else:
-        xcat = split_catalogue(gaiacat, gaiapath, ext=1 )
-    
-    print (f"adding epoch to input cat?")    
-    if do_epoch: 
-        editObscat(rootobs,work,TOPCATPATH)
-        print (f"\n \033[1m{'done editing input catalogue by adding obs_epoch'}\033[0m\n")
-    # possibly, check that it worked and they all have obs_epoch
+        xcat = split_catalogue(gaiacat, gaiapath, ext=1)
 
-    # set list of chunks (ep1,ep2) given as parameter input, e.g. all the 'hour' files
-    epoch_array = np.arange(process_epoch_range[0],process_epoch_range[1],process_epoch_step)
-    # so, we want to get epochs from epoch_array[k] to epoch_array[k]+process_epoch_step
-    n_epochs = len(epoch_array) - 1
+    print("adding epoch to input cat?")
+    if do_epoch:
+        editObscat(rootobs, work, TOPCATPATH)
+        print(f"\n \033[1m{'done editing input catalogue by adding obs_epoch'}\033[0m\n")
 
-    # collect all the data for epoch number k and strip out every column
-    #    except IAUNAME, OBSID, SRCNUM, RA, DEC, obs_epoch
+    # build epoch array
+    epoch_array = np.arange(process_epoch_range[0], process_epoch_range[1],
+                            process_epoch_step)
 
-    merged_output_file_list=[]   
+    # pre-slice all epochs from the SUSS file (single read of the big file)
+    epoch_slices = pre_slice_epochs(rootobs, chunks, catalog,
+                                    epoch_array, process_epoch_step)
 
-    for k in np.arange(n_epochs):
-        ep1 = epoch_array[k]
-        ep2 = ep1 + process_epoch_step
-        t1 = time.time()
+    if n_workers <= 1:
+        # ---- Sequential path (same logic, but with pre-loaded data) ----
+        merged_output_file_list = []
+        for ep1_key in sorted(epoch_slices.keys()):
+            tab, obsids = epoch_slices[ep1_key]
+            ep1 = ep1_key
+            ep2 = ep1 + process_epoch_step
+            t1 = time.time()
 
-      # process our catalog to get a subset for this epoch
-      # obs_cat = work+'/epoch_slice_cat.fits'
-    
-        obsids = getEpochObscat(ep1,ep2,rootobs,obs_cat)    
-        if len(obsids) == 0: 
-            continue    
-  #
-  # at this point I have a problem - match against the whole Gaia pm>10 catalogue 
-  # or first make a subset of that catalogue for all the observed fields and then 
-  # match ? 
-  # matching one obsid takes several minutes. We have hundreds of thousand 
-  # obsids so of order 1e5+ s goes into this subsetting ... 
-  # split the gaia catalog in pieces and then limit the search to those for each pointing 
-  #
-        if use_healpix:
-            processGaiaPM2(rootobs,chunks=chunks, xcat=xcat, obsids=obsids,chatter=1) 
-            # was (chunks,rootobs,obsids,gaiacat,gaia_temp_cat,TOPCATPATH,RADIUS,xcat)
+            tab.write(obs_cat, overwrite=True)
+            print(f"{ep1:.1f}: {len(tab)} rows, {len(obsids)} obsids")
 
-        else:
-            processGaiaPM(rootobs,chunks=chunks, xcat=xcat, obsids=obsids, chatter=1) 
-            # output is catalogue for all gaia tiles for this epoch
+            if use_healpix:
+                processGaiaPM2(rootobs, chunks=chunks, xcat=xcat,
+                               obsids=obsids, chatter=1)
+            else:
+                processGaiaPM(rootobs, chunks=chunks, xcat=xcat,
+                              obsids=obsids, chatter=1)
 
-  # now we can do the matching 
-        t2 = time.time()
-        merged_out = f"cat_out_{ep1:06.1f}.fits"
-        match2gaia_cat(root='.', catin=obs_cat ,cat_matched='matched.fits',\
-          cat_nomatch='nomatch.fits', gaia_epoch=GaiaEpoch, \
-          obsEpochRange=[ep1,ep2],toEpochs=[2000.0], gaia_cat=gaia_temp_cat,\
-          outputf=merged_out )
-     
-        print (f"for epoch {ep1} the results is in file {merged_out} \n removing temp files\n")
-        os.system(f"rm -f tmp_cat_*.fits")
-        merged_output_file_list.append(merged_out)
-        t3 = time.time()
-        print (f"elapsed time matching to Gaia = {t3-t1}")
+            merged_out = f"cat_out_{ep1:06.1f}.fits"
+            match2gaia_cat(root='.', catin=obs_cat, cat_matched='matched.fits',
+                           cat_nomatch='nomatch.fits', gaia_epoch=GaiaEpoch,
+                           obsEpochRange=[ep1, ep2], toEpochs=[2000.0],
+                           gaia_cat=gaia_temp_cat, outputf=merged_out)
 
-  #  clean up any tmp files left
-        #try:
-        #   os.system(f"rm  tmp_cat_1*.fits ")     
-        #   os.system(f"rm  tmp_cat_2*.fits ")     
-        #   os.system(f"rm  tmp_cat_*.fits")     
-        #except: pass
+            merged_output_file_list.append(merged_out)
+            os.system("rm -f tmp_cat_*.fits")
+            print(f"epoch {ep1:.1f} done in {time.time()-t1:.1f}s\n")
+
+    else:
+        # ---- Parallel path ----
+        from concurrent.futures import ProcessPoolExecutor, as_completed
+        import multiprocessing
+        multiprocessing.set_start_method('fork', force=True)
+
+        # extract picklable data from xcat
+        xcat_data = XcatData(
+            table=xcat.t,
+            healpix=np.array(xcat.healpix),
+            depth=xcat.depth)
+        # build pointing data once
+        pointing_data = build_pointing_data(rootobs, chunks, catalog)
+
+        main_work_dir = os.path.abspath(work.rstrip('/'))
+        worker_base = os.path.join(main_work_dir, '_parallel_workers')
+        os.makedirs(worker_base, exist_ok=True)
+
+        # build task list
+        tasks = []
+        for ep1_key in sorted(epoch_slices.keys()):
+            tab, obsids = epoch_slices[ep1_key]
+            ep1 = ep1_key
+            ep2 = ep1 + process_epoch_step
+            worker_dir = os.path.join(worker_base, f"epoch_{ep1:06.1f}")
+            tasks.append((
+                ep1, ep2, tab, obsids, xcat_data, pointing_data,
+                worker_dir, main_work_dir, rootobs, chunks, GaiaEpoch))
+
+        print(f"\nDispatching {len(tasks)} epochs across {n_workers} workers...\n")
+
+        results = []
+        with ProcessPoolExecutor(max_workers=n_workers) as executor:
+            futures = {executor.submit(_process_single_epoch, t): t[0]
+                       for t in tasks}
+            for future in as_completed(futures):
+                result = future.result()
+                results.append(result)
+
+        # summary
+        results.sort(key=lambda r: r[0])
+        n_ok = sum(1 for r in results if r[1])
+        n_fail = sum(1 for r in results if not r[1])
+        total_elapsed = time.time() - t_total
+        print(f"\n{'='*60}")
+        print(f"Completed: {n_ok} epochs, Failed: {n_fail} epochs")
+        print(f"Total wall time: {total_elapsed:.0f}s ({total_elapsed/60:.1f} min)")
+        if n_fail > 0:
+            print("\nFailed epochs:")
+            for r in results:
+                if not r[1]:
+                    print(f"  {r[0]:.1f}: {r[3]}")
+        print(f"{'='*60}\n")
+
+        # clean up worker directories
+        shutil.rmtree(worker_base, ignore_errors=True)
 
    

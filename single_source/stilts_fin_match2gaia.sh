@@ -23,7 +23,10 @@ stilts cdsskymatch cdstable=I/355/gaiadr3 find=each in=$IN2 ifmt=fits \
  ocmd='addcol mismatchedPM "0" ' ocmd='delcols "2000Ep"'
 echo
 echo make file 2 match preparing
-stilts tpipe in=gaia_pm_match.fits ifmt=fits  out=tmp_gaia_pm_match.fits ofmt=fits cmd='delcols "designation source_id ra2016gaia dec2016gaia parallax pm_in pmra_in pmra_error pmdec pmdec_error Separation"'
+stilts tpipe in=gaia_pm_match.fits ifmt=fits  out=tmp_gaia_pm_match.fits ofmt=fits \
+ cmd='delcols "designation source_id ra2016gaia dec2016gaia parallax pm_in pmra_in pmra_error pmdec pmdec_error Separation phot_g_mean_mag bp_rp bp_g g_rp non_single_star"' \
+ cmd='colmeta -name PM PM_cds' \
+ cmd='colmeta -name pmRA pmRA_cds'
 echo
 echo tcat them
 stilts tcat in='tmp_gaia_pm_match.fits gaia_no_pm_match.fits' ifmt=fits out=$OUT ofmt=fits

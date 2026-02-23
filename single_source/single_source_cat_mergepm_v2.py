@@ -17,6 +17,7 @@
 # same PM within a limit, and are in the same area on the sky.
 
 import os
+import configparser
 import numpy as np
 import numpy.ma as ma
 import astropy, numpy
@@ -25,48 +26,66 @@ from astropy.table import Table, Column, MaskedColumn
 
 # updates: return list of obsids, epochs [can be used to search for original records)
 #  return median, skew, etc.
-# not yet: ABmag upper limits from SUMMARY 
+# not yet: ABmag upper limits from SUMMARY
 
 ########################################################################################
 # globals
+
+# --- Load config ---
+def _load_mergepm_config():
+    """Load configuration from config.ini if it exists."""
+    config = configparser.ConfigParser()
+    module_dir = os.path.dirname(os.path.abspath(__file__))
+    config_path = os.path.join(module_dir, 'config.ini')
+    if os.path.exists(config_path):
+        config.read(config_path)
+    return config
+
+_cfg = _load_mergepm_config()
+_SEC = 'mergepm'
+
 # define globals:
 
 # output filename : see fileio() how it is being derived
-fix_duplicate = False # do not set! needs a lot of eval to get it to work - 
-# the start/stop times are for agregated images for one obsid, with often 
-# multiple image snapshots being merged 
+fix_duplicate = False # do not set! needs a lot of eval to get it to work -
+# the start/stop times are for agregated images for one obsid, with often
+# multiple image snapshots being merged
 colsofinterest = ["IAUNAME","SRCNUM","obs_epoch","OBSIDS","EPOCHS",'UVW2_ABMAG','UVM2_ABMAG','UVW1_ABMAG','U_ABMAG',"RA_ERR","DEC_ERR","UVW2_NOBS","UVM2_NOBS","UVW1_NOBS","U_NOBS"]
 
-iauname="IAUNAME" 
+iauname="IAUNAME"
 bands=['UVW2','UVM2','UVW1','U','B','V']  # I think White is absent
 
-catalog = "SUSS" #'testsuss' # 'SUSS' 'UVOTSSC2'
+catalog = _cfg.get(_SEC, 'catalog', fallback='SUSS')
 outtable = None
 matched2gaia = "sussxgaiadr3_ep2000.fits"
-Rpm_limit = 10 # if PM/error < Rpm_limit the record will not be merged
-chatter = 0
+Rpm_limit = _cfg.getint(_SEC, 'Rpm_limit', fallback=10)
+chatter = _cfg.getint(_SEC, 'chatter', fallback=0)
+STILTS = os.path.join(_cfg.get('DEFAULT', 'TOPCATPATH', fallback='/opt/homebrew/bin'), 'stilts')
 
 
 if catalog == 'SUSS':
-    rootobs = '/Volumes/DATA11/data/catalogs/test_2/'
-    chunk = "sussxgaiadr3_ep2000_singlerecs.fits" 
-    pm_cds = "PM_cds"  # proper motion 
+    rootobs = _cfg.get(_SEC, 'rootobs', fallback='./output/')
+    chunk = _cfg.get(_SEC, 'chunk', fallback="sussxgaiadr3_ep2000_singlerecs.fits")
+    pm_cds = _cfg.get(_SEC, 'pm_col', fallback='PM')
+    pmRA_col = _cfg.get(_SEC, 'pmRA_col', fallback='pmRA')
     Rplx = "RPlx"  # Parallax over Error
     onedone = False # if the sources without large pm have been written already
-    hipm_chunk = "sussxgaiadr3_ep2000_singlerecs_hipm.fits"
+    hipm_chunk = _cfg.get(_SEC, 'hipm_chunk',
+        fallback="sussxgaiadr3_ep2000_singlerecs_hipm.fits")
 elif catalog == 'UVOTSSC2':
-    rootobs = '/Users/kuin/pymodules/cats/' # /Users/data/catalogs/uvotssc2/' 
-    chunk =  "TBD x gaia" # 'cat_out_all_pm.fits' 
+    rootobs = '/Users/kuin/pymodules/cats/' # /Users/data/catalogs/uvotssc2/'
+    chunk =  "TBD x gaia" # 'cat_out_all_pm.fits'
 elif catalog == 'test':
     rootobs = '/Users/data/catalogs/uvotssc2/'
     chunk = 'test_sources.fits'
 elif catalog == 'testsuss':
     rootobs = '/Volumes/DATA11/data/catalogs/test/'
-    chunk = "sussxgaiadr3_ep2000_singlerecs.csv"  
-    pm_cds = "PM_cds"  # proper motion 
+    chunk = "sussxgaiadr3_ep2000_singlerecs.csv"
+    pm_cds = "PM"
+    pmRA_col = "pmRA"
     Rplx = "RPlx"  # Parallax over Error
 
-tmax = int(5e8) # mximum number of records to read in (adjust for test)
+tmax = int(5e8) # maximum number of records to read in (adjust for test)
 
 print (f"checking proper motion in col {pm_cds} and using parallax over error column {Rplx}")
 
@@ -222,7 +241,7 @@ def stats(array, err=[None], syserr=0.005, nobs=None, chi2=None, sd=None, skew=N
     e.sort()
     if n == 1:
        return 1, a[0], np.NaN, e[0], np.nan, np.nan
-    if n/2*2 == n:
+    if n % 2 == 0:
        median = 0.5*( a[int((n-1)/2)]+ a[int((n+1)/2)] ) 
        sd = 0.5*( e[int((n-1)/2)]+ e[int((n+1)/2)]  )
     else:
@@ -280,43 +299,47 @@ def fileio(infile,outstub="_stg2",outdir=""):
     if len(t) < 1:
         raise IOError("the catalogue table loading failed.\n")  
     
-    print (f"total number of input sources before merging high PM ones is {len(t)}")    
-    # now just limit the processing to high PM entries   (tx) and leave the rest (ty)  
-    try:     
-        tx = t[ t[pm_cds] > 20. ]  
-        ty = t[ (np.isnan(t[pm_cds]) ) | (t[pm_cds] <= 20.)  ]
+    ntotal = len(t)
+    print (f"total number of input sources before merging high PM ones is {ntotal}")
+    # now just limit the processing to high PM entries   (tx) and leave the rest (ty)
+    try:
+        tx = t[ t[pm_cds] > 20. ]
+        nlow = ntotal - len(tx)
     except:
-        print ("279 problem reading table -- colnames are \n {t.colnames}")    
-        exit            
+        print ("279 problem reading table -- colnames are \n {t.colnames}")
+        exit
+    # Free the full table to save memory (STILTS handles the low-PM extraction separately)
+    del t
+    import gc; gc.collect()
 
     outfile=instub+outstub+"a.csv"
-    if not onedone: 
+    if not onedone:
        outf = open(outdir+outfile,'w')  # file handle for all records that do not need another merge
-    else:   
-       outf = "outf_296"   
+    else:
+       outf = "outf_296"
     outfile2=instub+outstub+"b.csv"
-    outf2 = open(outdir+outfile2,'w')  # for new merges 
+    outf2 = open(outdir+outfile2,'w')  # for new merges
     outerr = open(outdir+instub+"_err.csv",'w')  #was:file handle weird ones with same PM but different parallax_over_error
-    # 
+    #
     # we now need to group the sources according to close position and PM
     #
     # distance: best is distance < 0.001xPM arcminutes
-    # delta PM < 1e-2 
-    # 
-    # method: index of group after sort by PM, then sort by position, then check membership 
+    # delta PM < 1e-2
+    #
+    # method: index of group after sort by PM, then sort by position, then check membership
     #
     # after that we can call up the record/row selection by that.
     #
     #tx.add_index(pm_cds)
     sources = tx[pm_cds]
     sources = np.unique(sources)
-    
-    print (f"NUMBER OF UNIQUE SOURCES : low PM:{len(ty)} high PM: {len(sources)}\n")
+
+    print (f"NUMBER OF UNIQUE SOURCES : low PM:{nlow} high PM: {len(sources)}\n")
     try:
         del f[1].data
         del f[2].data
     except: pass
-    return tx, outf, sources, ty, outf2, outerr
+    return tx, outf, sources, nlow, outf2, outerr
 
    
 
@@ -614,41 +637,73 @@ def mainsub2(chunk,chatter=0):
     # get list of unique sources, output file handle, table, summary
     if onedone:   # limiting processing to just the hipm data (saves lots of time!)
        chunk = hipm_chunk
-    tx, outf, sources, ty, outf2, outerr = fileio(rootobs+chunk)
-    
-    low_pm_nrows = len(ty)
+
+    import time
+    chunk_stem = chunk.rsplit('.', 1)[0]
+    chunk_ext  = chunk.rsplit('.', 1)[1]
+    chunk_ifmt = 'csv' if chunk_ext.lower() == 'csv' else 'fits'
+    inpath = rootobs + chunk
+
+    # --- Step 1: Use STILTS to extract low-PM and high-PM subsets (streaming, low memory) ---
+    outfits_lowpm = rootobs + chunk_stem + "_stg2a.fits"
+    outfits_hipm  = rootobs + chunk_stem + "_hipm.fits"
+    k9 = 0
+
+    if not onedone:
+        if os.path.exists(outfits_lowpm):
+            print(f"Step 1a: Reusing existing {outfits_lowpm}", flush=True)
+            with fits.open(outfits_lowpm) as hdul:
+                k9 = len(hdul[1].data)
+            print(f"  {k9} low-PM sources already extracted")
+        else:
+            print(f"Step 1a: Extracting low-PM sources with STILTS ...", flush=True)
+            t0 = time.time()
+            stilts_cmd = (f'{STILTS} tpipe in={inpath} ifmt={chunk_ifmt} '
+                          f'out={outfits_lowpm} ofmt=fits-basic '
+                          f"cmd='select \"NULL_{pm_cds} || {pm_cds} <= 20\"'")
+            status = os.system(stilts_cmd)
+            if status == 0:
+                with fits.open(outfits_lowpm) as hdul:
+                    k9 = len(hdul[1].data)
+                print(f"  wrote {k9} low-PM sources to {outfits_lowpm} ({time.time()-t0:.0f}s)")
+            else:
+                print(f"WARNING: STILTS low-PM extraction failed (status={status})")
+
+    if os.path.exists(outfits_hipm):
+        print(f"Step 1b: Reusing existing {outfits_hipm}", flush=True)
+    else:
+        print(f"Step 1b: Extracting high-PM sources with STILTS ...", flush=True)
+        t0 = time.time()
+        stilts_cmd = (f'{STILTS} tpipe in={inpath} ifmt={chunk_ifmt} '
+                      f'out={outfits_hipm} ofmt=fits-basic '
+                      f"cmd='select \"!NULL_{pm_cds} && {pm_cds} > 20\"'")
+        status = os.system(stilts_cmd)
+        if status != 0:
+            raise RuntimeError(f"STILTS high-PM extraction failed (status={status})")
+        print(f"  high-PM extraction done ({time.time()-t0:.0f}s)", flush=True)
+
+    # --- Step 2: Read only the small high-PM subset into Python ---
+    print(f"Step 2: Loading high-PM subset into Python ...", flush=True)
+    t0 = time.time()
+    with fits.open(outfits_hipm) as fh:
+        tx = Table(fh[1].data)
     high_pm_rows = len(tx)
-    
-    # edit the columns 
+    print(f"  loaded {high_pm_rows} high-PM rows ({time.time()-t0:.0f}s)", flush=True)
+
+    # edit the columns
     t = make_new(tx) # remove and add columns to the Table
-    #print(t[:20],"\n")
-    
-    # write column HEADERS to ascii/csv file
+
+    # Prepare output CSV for high-PM merged sources
+    instub = (rootobs + chunk).rsplit('.', 1)[0]
+    outfile2 = instub + "_stg2b.csv"
+    outf2 = open(outfile2, 'w')
+    outerr = open(instub + "_err.csv", 'w')
+
+    # write column HEADERS to csv file
     col = t.colnames
     nc = len(col)
-    for k in range(nc-1): 
-        if not onedone: outf.write( f"{col[k]}," )
-        outf2.write( f"{col[k]}," )
-    if not onedone: outf.write(f"{col[nc-1]}\n")  
-    outf2.write(f"{col[nc-1]}\n")  
+    outf2.write(','.join(col) + '\n')
 
-    #print("evaluating ",col," sources\n")
-    if not onedone:
-        k9 = 0    # counter records
-
-        # first with the sources with low PM
-        #
-        # ** this should be done by a stilts script to save two hours **
-        # f"java -jar ~/bin/topcat-full.jar -stilts tpipe in={} out={} select='PM_cds < 20' "
-        #
-        for trow in ty:
-            print ("call create_csv_  484")
-            create_csv_output_record(trow,outf,col,nc)
-            k9 += 1
-        outf.close()
-        print (f"wrote {k9} records in {outf} for the low-pm sources ...")
-        
-    # reset
     k9 = 0
 # now process the high pm rows
     print (f"646 processing {len(tx)} high PM records")
@@ -679,7 +734,7 @@ def mainsub2(chunk,chatter=0):
     #
     ra = tx['ra2000Ep'][q]
     dec = tx['dec2000Ep'][q]
-    pm_ra = tx['pmRA_cds'][q]
+    pm_ra = tx[pmRA_col][q]
     pm_dec = tx['pmDE'][q]
     id = tx['IAUNAME'][q]
     clusters, cluster_data = cluster_sources(ra, dec, pm_ra, pm_dec, id, pm_tolerance=0.001, pm_distance_factor=0.01)
@@ -692,11 +747,12 @@ def mainsub2(chunk,chatter=0):
     print (f"of the high PM records, {len(srcids)} have multiple observation IAUNAME IDs\n")
     
     #t = Table(tx[1].data)    
+    # Only consider good-PM sources (exclude those already written with mismatchedPM==2)
     notinit = []
-    for src3 in tx['IAUNAME']:
-        if not src3 in srcids:
+    for src3 in tx['IAUNAME'][q]:
+        if src3 not in srcids:
            notinit.append(src3)
-    print (f"and {len(notinit)} are single sources")       
+    print (f"and {len(notinit)} are single high-PM sources (not clustered)")
 
     # write the hi PM records that do not cluster
     for name in notinit:
@@ -715,11 +771,13 @@ def mainsub2(chunk,chatter=0):
         # find the cluster members
         indices = cluster['indices']
         names   = cluster['ids']
-        tab_src = tx.loc[names]        
-        k9+=1                       
-        tab_ma = ma.asarray(tab_src)
-        nrow = tab_ma.size
-                
+        tab_src = tx.loc[names]
+        k9+=1
+        if type(tab_src) != astropy.table.row.Row:
+            nrow = len(tab_src)
+        else:
+            nrow = 1
+
         if type(tab_src) != astropy.table.row.Row: # is Table object ?
             new_row = tab_src[0] # on new row per iauname  
         else: 
@@ -755,14 +813,14 @@ def mainsub2(chunk,chatter=0):
             check = True    
             for band in bands:   # loop over all filters - merge into one 
                 nobs_all = 0
-                qf = tab_ma[band+"_QUALITY_FLAG_ST"]
+                qf = tab_src[band+"_QUALITY_FLAG_ST"]
                 if chatter > 2: print (f"751 checking {band}: quality_flag_st qf = {qf}\n qf.data={qf.data}523\n")
-                qfaa = qf.data
+                qfaa = np.asarray(qf)
                 qfok = []
                 for x6 in qfaa:
                     if len(x6) > 6: 
                         qfok.append(x6)
-                for x7 in tab_ma[band+"_NOBS"].data:
+                for x7 in np.asarray(tab_src[band+"_NOBS"]):
                     nobs_all += x7
                     if chatter > 3: print (f"759  for {x7} nobs_all = {nobs_all} cc")
                 if chatter > 2: print (f"757 qfok = {qfok}")        
@@ -866,13 +924,30 @@ def mainsub2(chunk,chatter=0):
     #
     #  join the two files --  use a stilts join instead -- 
     #
-    command = f"java -jar ~/bin/topcat-full.jar -stilts tcat in='{outf} {outf2}' ifmt=CSV out={outfile[:-4]}.fits ofmt=fits"
-    #command = f"cat {outf} {outf2} > {outfile[:-4}.csv"
-    try:
-        if onedone == False:
-            os.system(command)
-    except:
-        pass
+    # Join the low-PM (FITS) and high-PM (CSV) outputs
+    chunk_stem = chunk.rsplit('.', 1)[0]
+    outfits_lowpm = rootobs + chunk_stem + "_stg2a.fits"
+    outfits_final = rootobs + chunk_stem + "_stg2_merged.fits"
+    # Convert high-PM CSV to FITS first
+    outfits_hipm_merged = rootobs + chunk_stem + "_stg2b.fits"
+    print(f"Converting high-PM CSV to FITS ...", flush=True)
+    conv_cmd = (f"{STILTS} tpipe in={outf2.name} ifmt=csv "
+                f"out={outfits_hipm_merged} ofmt=fits-basic")
+    os.system(conv_cmd)
+
+    if not onedone and os.path.exists(outfits_lowpm):
+        command = (f"{STILTS} tcat in='{outfits_lowpm} {outfits_hipm_merged}' "
+                   f"ifmt=fits out={outfits_final} ofmt=fits-basic")
+        print(f"Merging low-PM and high-PM outputs with STILTS ...", flush=True)
+        status = os.system(command)
+        if status == 0:
+            print(f"Final merged output: {outfits_final}")
+        else:
+            print(f"WARNING: STILTS tcat failed (status={status})")
+    elif onedone:
+        # Only high-PM data processed, just rename
+        os.rename(outfits_hipm_merged, outfits_final)
+        print(f"Final output (high-PM only): {outfits_final}")
 
 ######### ######## ####### END
 
