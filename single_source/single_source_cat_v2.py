@@ -80,6 +80,7 @@ outtable = None
 
 _SEC = 'single_source'  # config.ini section for this module
 _ROOT = _ssc_cfg.get('DEFAULT', 'ROOT', fallback='/Volumes/DATA11/')
+_include_fw = _ssc_cfg.getboolean(_SEC, 'include_fixedwidth_cols', fallback=True)
 
 if catalog == 'SUSS':
     rootobs = _ssc_cfg.get(_SEC, 'rootobs',
@@ -179,9 +180,11 @@ def make_new(tx):
                names=[b+"_CHI2RED",b+"_CHISQ",b+"_NOBS",b+'_ABMAG_MIN',b+'_SKEW'])  
 #               names=[b+"_CHISQ",b+"_NOBS",b+'_ABMAG_MIN',b+'_VAR3',b+'_SKEW'])  
             tx.remove_columns([b+"_FLUX",b+"_FLUX_ERR"])
-    tx.add_columns([None,None,None],names=['OBSIDS', 'EPOCHS','SRCNUMS'])
-           
-    return tx         
+    tx.add_column(np.int64(-1), name='SRCNUM_INT')
+    if _include_fw:
+        tx.add_columns([None,None,None],names=['OBSIDS', 'EPOCHS','SRCNUMS'])
+
+    return tx
 
 def stats(array, err=[None], syserr=0.005):
     """
@@ -563,22 +566,28 @@ def mainsub(chunk):
             new_row = tab_src  # is Table Row
             
         base = evaluate_extended_nature(tab_src,summ)
+        # SRCNUM_INT: always populated (first SRCNUM value)
         if nrow == 1:
-            new_row['OBSIDS'] = f"{tab_src['OBSID']}"  #tab_src['OBSID']
-            new_row['EPOCHS'] = f"{tab_src['obs_epoch']:.5f}" #tab_src['obs_epoch']
-            new_row['SRCNUMS'] = f"{tab_src['SRCNUM']}" #
-            
+            new_row['SRCNUM_INT'] = int(tab_src['SRCNUM'])
         else:
-            obsidlist = f"{tab_src['OBSID'][0]}"
-            epochlist = f"{tab_src['obs_epoch'][0]:.5f}" #str(tab_src['obs_epoch'][0])
-            srcnumlist = f"{tab_src['SRCNUM'][0]}" 
-            for ix in np.arange(1,nrow):
-                obsidlist += f"_{tab_src['OBSID'][ix]}"  
-                epochlist += f"_{tab_src['obs_epoch'][ix]:.5f}"
-                srcnumlist += f"_{tab_src['SRCNUM'][ix]}"
-            new_row['OBSIDS'] = obsidlist
-            new_row['EPOCHS'] = epochlist
-            new_row['SRCNUMS'] = srcnumlist
+            new_row['SRCNUM_INT'] = int(tab_src['SRCNUM'][0])
+
+        if _include_fw:
+            if nrow == 1:
+                new_row['OBSIDS'] = f"{tab_src['OBSID']}"  #tab_src['OBSID']
+                new_row['EPOCHS'] = f"{tab_src['obs_epoch']:.5f}" #tab_src['obs_epoch']
+                new_row['SRCNUMS'] = f"{tab_src['SRCNUM']}" #
+            else:
+                obsidlist = f"{tab_src['OBSID'][0]}"
+                epochlist = f"{tab_src['obs_epoch'][0]:.5f}" #str(tab_src['obs_epoch'][0])
+                srcnumlist = f"{tab_src['SRCNUM'][0]}"
+                for ix in np.arange(1,nrow):
+                    obsidlist += f"_{tab_src['OBSID'][ix]}"
+                    epochlist += f"_{tab_src['obs_epoch'][ix]:.5f}"
+                    srcnumlist += f"_{tab_src['SRCNUM'][ix]}"
+                new_row['OBSIDS'] = obsidlist
+                new_row['EPOCHS'] = epochlist
+                new_row['SRCNUMS'] = srcnumlist
                                 
         for band in bands:
             qf = tab_ma[band+"_QUALITY_FLAG_ST"]
@@ -751,18 +760,25 @@ def mainsub_fast(chunk):
         # --- extended nature ------------------------------------------------
         base = evaluate_extended_nature(tab_src, summ)
 
-        # --- OBSIDS / EPOCHS / SRCNUMS strings ------------------------------
+        # --- SRCNUM_INT (always populated) -----------------------------------
         if is_single:
-            new_row['OBSIDS']   = f"{tab_src['OBSID']}"
-            new_row['EPOCHS']   = f"{tab_src['obs_epoch']:.5f}"
-            new_row['SRCNUMS']  = f"{tab_src['SRCNUM']}"
+            new_row['SRCNUM_INT'] = int(tab_src['SRCNUM'])
         else:
-            obsids  = "_".join(str(x) for x in tab_src['OBSID'])
-            epochs  = "_".join(f"{x:.5f}" for x in tab_src['obs_epoch'])
-            srcnums = "_".join(str(x) for x in tab_src['SRCNUM'])
-            new_row['OBSIDS']   = obsids
-            new_row['EPOCHS']   = epochs
-            new_row['SRCNUMS']  = srcnums
+            new_row['SRCNUM_INT'] = int(tab_src['SRCNUM'][0])
+
+        # --- OBSIDS / EPOCHS / SRCNUMS strings (optional) -------------------
+        if _include_fw:
+            if is_single:
+                new_row['OBSIDS']   = f"{tab_src['OBSID']}"
+                new_row['EPOCHS']   = f"{tab_src['obs_epoch']:.5f}"
+                new_row['SRCNUMS']  = f"{tab_src['SRCNUM']}"
+            else:
+                obsids  = "_".join(str(x) for x in tab_src['OBSID'])
+                epochs  = "_".join(f"{x:.5f}" for x in tab_src['obs_epoch'])
+                srcnums = "_".join(str(x) for x in tab_src['SRCNUM'])
+                new_row['OBSIDS']   = obsids
+                new_row['EPOCHS']   = epochs
+                new_row['SRCNUMS']  = srcnums
 
         # --- pre-compute masked array ONCE for multi-row sources ------------
         if not is_single:

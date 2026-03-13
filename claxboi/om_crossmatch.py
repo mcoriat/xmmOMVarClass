@@ -43,7 +43,8 @@ CATALOGUES = [
     {
         "name":       "AllWISE",
         "vizier":     "II/328/allwise",
-        "keep_cols":  ["W1mag", "W2mag"],
+        "keep_cols":  ["AllWISE", "W1mag", "W2mag", "W3mag", "W4mag",
+                       "e_W1mag", "e_W2mag", "e_W3mag", "e_W4mag"],
         "dedup_col":  "AllWISE",
     },
     {
@@ -266,18 +267,37 @@ def merge_all(cat_results):
             print(f"  merge {name} FAILED -- continuing without it")
             continue
 
-        # Remove the temporary RA_xm/DEC_xm columns and catalogue dedup ID
+        # Remove temporary columns; keep Separation (renamed) and dedup_col
+        # if it's explicitly in keep_cols
         tab = Table.read(step_out)
-        for dropcol in ["RA_xm", "DEC_xm", cat["dedup_col"],
-                        "Separation", "GroupSize", "GroupID"]:
+        # Rename Separation to Separation_{catalogue} to avoid collisions
+        sep_name = f"Separation_{name}"
+        if "Separation" in tab.colnames:
+            tab.rename_column("Separation", sep_name)
+        keep_set = set(cat["keep_cols"])
+        for dropcol in ["RA_xm", "DEC_xm", "GroupSize", "GroupID"]:
             if dropcol in tab.colnames:
                 tab.remove_column(dropcol)
+        # Only drop dedup_col if it's NOT in keep_cols
+        dedup = cat["dedup_col"]
+        if dedup not in keep_set and dedup in tab.colnames:
+            tab.remove_column(dedup)
         tab.write(step_out, overwrite=True)
 
-        # Resolve through rename mapping to find the actual column name
-        check_col = cat["keep_cols"][0]
+        # Find the first numeric keep_col for match-rate reporting
         renames = cat.get("rename", {})
-        check_col = renames.get(check_col, check_col)
+        check_col = None
+        for _kc in cat["keep_cols"]:
+            _kc_resolved = renames.get(_kc, _kc)
+            if _kc_resolved in tab.colnames:
+                try:
+                    tab[_kc_resolved].data.astype(float)
+                    check_col = _kc_resolved
+                    break
+                except (ValueError, TypeError):
+                    continue
+        if check_col is None:
+            check_col = renames.get(cat["keep_cols"][0], cat["keep_cols"][0])
         n_matched = np.sum(np.isfinite(tab[check_col].data
                                         .astype(float)))
         n_total = len(tab)
