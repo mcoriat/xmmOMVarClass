@@ -106,12 +106,12 @@ def extract_stg2_columns(resume=False):
     log("Step 0: Extracting needed columns from stg2_merged via STILTS...")
 
     # Build the list of columns to keep
-    keep_cols = ["IAUNAME", "SRCNUMS", "POSERR", "angDist"]
+    keep_cols = ["IAUNAME", "SRCNUMS", "POSERR", "angDist", "mismatchedPM"]
     for band in BANDS:
         keep_cols.extend([
             f"{band}_AB_MAG", f"{band}_AB_MAG_ERR",
             f"{band}_QUALITY_FLAG", f"{band}_EXTENDED_FLAG",
-            f"{band}_CHISQ", f"{band}_NOBS",
+            f"{band}_CHISQ", f"{band}_CHI2RED", f"{band}_NOBS",
         ])
     keep_cols.extend([
         "Source", "Plx", "e_Plx", "pmRA", "pmDE",
@@ -403,10 +403,36 @@ def main():
 
     dist = np.array(stg2["Dist"], dtype=np.float64)
 
+    # DOF computation:
+    #   For most sources (mismatchedPM != 3), CHISQ was computed in Stage 1
+    #   from individual observations, and NOBS = actual data points used.
+    #   So DOF = NOBS - 1 is correct.
+    #
+    #   For 926 sources with mismatchedPM == 3, Stage 2 recomputed CHISQ
+    #   from PM-group medians, but stored NOBS = nobs_all (accumulated total).
+    #   For these sources we set DOF = NaN (unreliable) — users should
+    #   consult CHI2RED for those cases.
+    mismatched = np.array(stg2["mismatchedPM"], dtype=np.int32)
+    is_stg2_recomputed = (mismatched == 3)
+    n_recomputed = np.sum(is_stg2_recomputed)
+    log(f"  Sources with Stage 2 recomputed chi-sq (mismatchedPM=3): "
+        f"{n_recomputed:,} — DOF set to NaN for these")
+
     chisq_dof = {}
+    chi2red = {}
     for band in BANDS:
         nobs = np.array(stg2[f"{band}_NOBS"], dtype=np.float64)
-        chisq_dof[band] = np.where(nobs > 1, nobs - 1, np.nan)
+        c2r = np.array(stg2[f"{band}_CHI2RED"], dtype=np.float64)
+
+        # Default: DOF = NOBS - 1 (valid for Stage 1 sources)
+        dof = np.where(nobs > 1, nobs - 1, np.nan)
+
+        # For mismatchedPM=3 sources, NOBS is unreliable for DOF.
+        # Set DOF = NaN; CHI2RED column provides the reduced chi-sq directly.
+        dof[is_stg2_recomputed] = np.nan
+
+        chisq_dof[band] = dof
+        chi2red[band] = c2r
 
     # === Step 5: Assemble output table ===
     log("Step 5: Assembling output table...")
@@ -449,6 +475,10 @@ def main():
         out[f"OM_{band}_CHISQ_DOF"] = chisq_dof[band]
         out[f"OM_{band}_CHISQ_DOF"].description = \
             f"OM {band} band chi-squared degrees of freedom"
+
+        out[f"OM_{band}_CHI2RED"] = chi2red[band]
+        out[f"OM_{band}_CHI2RED"].description = \
+            f"OM {band} band reduced chi-squared"
 
     # -- WISE columns --
     wise_col_map = [

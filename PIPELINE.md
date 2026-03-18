@@ -140,11 +140,17 @@ pm.mainsub2(pm.chunk)
 Classifies all 5.36M sources into 3 classes (Star, QSO, Galaxy) using CLAXBOI — a
 Bayesian Naive Bayes classifier with KDE-estimated per-class per-feature likelihoods.
 
-Steps:
-1. **Feature preparation**: Builds training labels from Gaia spectral types + SIMBAD cross-match
-2. **KDE distributions**: Estimates P(feature|class) for 12 features × 3 classes using sklearn KernelDensity
-3. **Coefficient optimization** (optional): Tunes 5 global weights via differential_evolution
-4. **Classification**: Computes posterior P(class|features) in log-space, assigns most probable class
+The CLAXBOI pipeline has its own preparation steps before classification:
+1. **External cross-matches** (`om_crossmatch.py`): Queries CDS VizieR for AllWISE,
+   SDSS DR16, 2MASS, and PanSTARRS photometry. These provide the infrared/optical
+   colours used as classification features. The AllWISE query returns W1–W4 magnitudes
+   + errors + AllWISE designation (3″ radius, best match).
+2. **Feature computation** (`om_compute_features.py`): Computes 12 colour/extent
+   features from the cross-matched photometry
+3. **Training label preparation**: Builds labels from Gaia spectral types + SIMBAD
+4. **KDE distributions**: Estimates P(feature|class) for 12 features × 3 classes using sklearn KernelDensity
+5. **Coefficient optimization** (optional): Tunes 5 global weights via differential_evolution
+6. **Classification**: Computes posterior P(class|features) in log-space, assigns most probable class
 
 Uses `classify_new_fast.py` — a fully vectorized numpy replacement achieving 21× speedup over the original.
 
@@ -246,11 +252,134 @@ Predicted counts:
 
 ---
 
+## Stage 4: 5XMM OM Assembly Table
+
+### What it does
+Produces a lightweight FITS table (~2.4 GB, 68 columns) for inclusion in the 5XMM
+catalogue. Extracts and renames selected columns from the 26 GB pipeline output,
+runs a new AllWISE cross-match (W1–W4 + errors), computes match probabilities for
+Gaia and WISE associations, and derives additional columns.
+
+Steps:
+1. **STILTS column extraction**: Single-pass streaming read of the 26 GB stg2_merged
+   file to extract ~56 columns into a ~7 GB intermediate file
+2. **SRCNUM extraction**: Parses the first integer from the SRCNUMS string column
+3. **AllWISE CDS cross-match**: Queries VizieR `II/328/allwise` via STILTS `cdsskymatch`
+   (radius=3″, best match), returning W1–W4 magnitudes, errors, and AllWISE designation.
+   Deduplicates on AllWISE name, then merges back onto 5.36M sources via `tmatch2`
+4. **Match probabilities**: Likelihood Ratio method for both Gaia↔OM and WISE↔OM:
+   `LR = exp(-r²/(2σ²)) / (2πσ²ρ)`, `P(match) = LR / (LR + 1)`
+   - Gaia: uses `angDist` (separation) and `POSERR` (OM positional uncertainty),
+     background density ρ ≈ 4.2×10⁻² src/arcsec²
+   - WISE: uses STILTS `Separation`, combined σ = √(POSERR² + 0.5²),
+     background density ρ ≈ 1.7×10⁻² src/arcsec²
+5. **Derived columns**: PARALLAX_OVER_ERROR, CHI2RED pass-through, CHISQ_DOF = NOBS−1
+   (set to NaN for the 926 mismatchedPM=3 sources where Stage 2 recomputed χ²)
+6. **Assembly + write**: Builds the final table with standardised column names
+
+### Command
+```bash
+cd /Users/mcoriat/Desktop/XMM-SSC/5XMM/Classification/xmmOMVarClass
+/Users/mcoriat/Desktop/XMM-SSC/5XMM/Classification/venv/bin/python3 \
+  assemble_5xmm_om_table.py [--resume] [--skip-wise]
+```
+
+Flags:
+- `--resume`: Reuse intermediate files (STILTS extraction, AllWISE query/merge)
+  if they already exist. Safe to restart after interruption.
+- `--skip-wise`: Skip AllWISE cross-match entirely (WISE columns filled with NaN)
+- `--output PATH`: Override default output path
+
+### Prerequisites
+- Stage 2.2 output: `output/sussxgaiadr3_ep2000_singlerecs_stg2_merged.fits`
+- Stage 3 output: `claxboi/output/classification_OM.fits`
+- Slim catalogue: `claxboi/intermediates/suss_slim.fits` (used as input for CDS query)
+
+### AllWISE cross-match details
+
+The AllWISE cross-match is originally performed during Stage 3 preparation
+(`claxboi/om_crossmatch.py`, Step 1 of the CLAXBOI pipeline), which queries
+AllWISE, SDSS DR16, 2MASS, and PanSTARRS via CDS to build external photometry
+for classification features. However, the initial run only kept W1mag and W2mag.
+The pipeline code (`om_crossmatch.py`) has since been updated to keep all 4 bands
+plus errors, but the current `suss_with_extphot.fits` intermediate still reflects
+the old query. This stage re-queries CDS to obtain the full set:
+
+| Column | Description |
+|--------|-------------|
+| AllWISE | AllWISE designation (e.g. J000000.00+000000.0) |
+| W1mag, W2mag, W3mag, W4mag | WISE magnitudes (3.4, 4.6, 12, 22 μm) |
+| e_W1mag, e_W2mag, e_W3mag, e_W4mag | Magnitude errors |
+
+The query uses `suss_slim.fits` (5.36M unique sources, 24 columns) as input.
+CDS `cdsskymatch` with `find=best` returns only the single closest AllWISE match
+within 3″. After deduplication on AllWISE name (removing ~43k duplicates),
+sources are merged back by sky position via STILTS `tmatch2`.
+
+Match rate: ~29% (1.56M / 5.36M) — many UV-selected OM sources lack infrared
+counterparts, which is expected.
+
+### Output columns (68 total)
+
+| Group | Columns | Count |
+|-------|---------|-------|
+| OM photometry | OM_{band}_AB_MAG, _ERR, _QUALITY_FLAG, _EXTENDED_FLAG, _CHISQ, _CHISQ_DOF, _CHI2RED × 6 bands | 42 |
+| OM source ID | OM_SRCID | 1 |
+| WISE photometry | WISE_NAME, W1–W4 MAG + ERR, WISE_MATCH_PROB | 10 |
+| Gaia DR3 | SOURCE_ID, PARALLAX, _ERROR, _OVER_ERROR, PM_RA, PM_DEC, GMAG, BPMAG, RPMAG, MATCH_PROB, DIST | 11 |
+| Classification | CLASSOPT_CLASS, PROB_STAR, PROB_AGN, PROB_GALAXY | 4 |
+
+### CHISQ_DOF caveat
+For 926 sources with `mismatchedPM = 3` (high-PM sources merged in Stage 2.2),
+the χ² was recomputed from PM-group medians but `NOBS` stores the accumulated
+total from Stage 1. `CHISQ_DOF` is set to NaN for these sources. The `CHI2RED`
+column (= χ²/nObs as computed by the pipeline) is always available as an alternative.
+
+### Intermediate files
+- `output/intermediates/stg2_slim_extract.fits` — ~7 GB, 56 columns from stg2_merged
+- `output/intermediates/xmatch_allwise_trimmed.fits` — deduplicated CDS output
+- `output/intermediates/xmatch_allwise_merged.fits` — AllWISE merged with suss_slim
+
+### Output
+- `output/5xmm_om_assembly.fits` — 5,363,088 rows, 68 columns, 2.39 GB
+
+### Estimated time
+- STILTS extraction: ~40 sec
+- CDS AllWISE query: ~2.5 min (may vary with CDS load)
+- Assembly + write: ~30 sec
+- **Total: ~4 min** (with `--resume` after first run: ~1 min)
+
+---
+
+## Planned Pipeline Modifications
+
+The following changes are planned for future pipeline runs to avoid the need
+for the Stage 4 patch script:
+
+### 1. Expanded WISE columns (`claxboi/om_crossmatch.py`) — DONE
+- ~~Add W3mag, W4mag, e_W1mag–e_W4mag to `keep_cols`~~ — already updated in code
+- Keep `AllWISE` designation column (currently dropped during dedup)
+- Keep `Separation` column (currently dropped — needed for match probability)
+- **Note**: Code is updated but current `suss_with_extphot.fits` still reflects
+  the old query. Will take effect on next full pipeline re-run.
+
+### 2. Keep Gaia match separation (`single_source/stilts_fin_match2gaia.sh`)
+- Remove `Separation` from the `delcols` command at line 27 (needed for Gaia match prob)
+- Remove `parallax_over_error` from `delcols` at line 16 (needed for output)
+
+### 3. Optional fixed-width columns (`single_source/single_source_cat_v2.py`)
+- Add `SRCNUM_INT` integer column alongside the existing SRCNUMS string
+- Make OBSIDS, EPOCHS, SRCNUMS fixed-width string columns optional via config flag
+  (these account for 19.1 GB of the 26 GB output file)
+
+---
+
 ## Directory Structure
 
 ```
 xmmOMVarClass/
 ├── README.md, PIPELINE.md, .gitignore, requirements.txt
+├── assemble_5xmm_om_table.py     # Stage 4: 5XMM assembly (patch script)
 ├── data/                          # Input catalogues
 │   ├── XMM-OM-SUSS6.1.fits       #   SUSS 6.1 (9.9M rows)
 │   ├── XMM-OM-SUSS6.1ep.fits     #   Epoch version
@@ -271,7 +400,9 @@ xmmOMVarClass/
 ├── variability/                   # Variability analysis module
 │   └── xmm2athena.py             #   Main variability code
 ├── output/                        # Final pipeline outputs
-│   └── sussxgaiadr3_ep2000_singlerecs_stg2_merged.fits
+│   ├── sussxgaiadr3_ep2000_singlerecs_stg2_merged.fits  # Stage 2.2 (26 GB)
+│   ├── 5xmm_om_assembly.fits     #   Stage 4 output (2.4 GB)
+│   └── intermediates/             #   Stage 4 working files
 └── tests/                         # Test data and utilities
 ```
 
@@ -295,13 +426,14 @@ Classification configuration in `claxboi/configfile.ini` (see Stage 3 section).
 
 ## Row Count Summary
 
-| Stage | Rows | Description |
-|-------|------|-------------|
-| Input SUSS 6.1 | 9,938,983 | Raw observations |
-| After Gaia match (Stage 1b) | 7,722,233 | Matched to Gaia DR3 |
-| Unique sources (Stage 2.1) | 5,364,037 | One row per IAUNAME |
-| After PM merge (Stage 2.2) | 5,363,088 | High-PM duplicates merged |
-| After classification (Stage 3) | 5,363,088 | + 71 classification columns |
+| Stage | Rows | Columns | Size | Description |
+|-------|------|---------|------|-------------|
+| Input SUSS 6.1 | 9,938,983 | — | — | Raw observations |
+| After Gaia match (Stage 1b) | 7,722,233 | 256 | 8.4 GB | Matched to Gaia DR3 |
+| Unique sources (Stage 2.1) | 5,364,037 | 239 | 26 GB | One row per IAUNAME |
+| After PM merge (Stage 2.2) | 5,363,088 | 239 | 26 GB | High-PM duplicates merged |
+| After classification (Stage 3) | 5,363,088 | 71 | 2.7 GB | + classification columns |
+| 5XMM assembly (Stage 4) | 5,363,088 | 68 | 2.4 GB | Lightweight output for 5XMM |
 
 ## Known Issues / Notes
 - The 26GB FITS files are large due to STILTS storing OBSIDS/EPOCHS/SRCNUMS as
@@ -313,3 +445,12 @@ Classification configuration in `claxboi/configfile.ini` (see Stage 3 section).
 - The `stats()` function has a latent bug: default `err=[None]` would crash if
   called without the `err` kwarg (`.all()` on a plain list). In practice, it's
   always called with `err=errx`.
+- **CHISQ_DOF unreliable for 926 mismatchedPM=3 sources**: When Stage 2.2 merges
+  high-PM groups, it recomputes χ² from PM-group medians but stores the accumulated
+  `NOBS` from Stage 1 (sum of per-group observation counts). This means
+  `DOF = NOBS - 1` overestimates the true degrees of freedom for these sources.
+  The assembly script (Stage 4) sets DOF = NaN for them. `CHI2RED` (= χ²/nObs as
+  computed by the pipeline) remains valid and is included as a separate column.
+- **AllWISE CDS match rate is ~29%**: The pipeline cross-match via `suss_slim.fits`
+  (unique sources) yields 1.56M matches out of 5.36M. This is expected — many
+  UV-selected OM sources are too faint in the infrared for AllWISE detection.
